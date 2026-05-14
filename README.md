@@ -28,6 +28,7 @@ The app is fully self-contained — a single `DiscordHass.exe` carrying its own
 * [Customizing helper names and icons](#customizing-helper-names-and-icons)
 * [Automation recipes](#automation-recipes)
 * [How it works](#how-it-works)
+* [Updates](#updates)
 * [Where things live on disk](#where-things-live-on-disk)
 * [Troubleshooting](#troubleshooting)
 * [Build from source](#build-from-source)
@@ -262,6 +263,37 @@ Discord desktop ─┐                                ┌─► input_boolean.di
 
 ---
 
+## Updates
+
+DiscordHass checks GitHub for new releases on its own.
+
+* **What it does.** Once a day (and 30 s after startup), the app hits
+  `https://api.github.com/repos/lischetzke/discord_hass_bridge/releases/latest`,
+  compares the tag against its installed version, and if there's something
+  newer it lights up a bold *Install update: vX.Y.Z…* item in the tray
+  menu and shows a one-time balloon tip.
+* **What happens when you click it.** A small download dialog appears.
+  The new exe is downloaded to `%LOCALAPPDATA%\DiscordHass\update\`, its
+  SHA-256 is verified against the release's `.sha256` sidecar, the running
+  exe is moved aside to `<exe>.old`, the new exe is put in place, and the
+  new version is launched. The dialog shows "Restarting…" for a beat and
+  the app comes back already running the new build. The leftover `.old`
+  file is cleaned up on next launch.
+* **Settings → General** has *Check for updates automatically* (default
+  on), the installed version, the last-check timestamp, a manual *Check
+  now* button, and a link to the GitHub releases page.
+* **Privacy.** The only request DiscordHass makes to GitHub is the single
+  `releases/latest` API call. The asset download is a direct HTTPS GET to
+  the URL GitHub returns. Nothing about your HA setup or Discord activity
+  leaves the machine.
+
+If you'd rather update by hand, turn off auto-check and download the new
+exe from the [releases page](https://github.com/lischetzke/discord_hass_bridge/releases)
+when you feel like it. Replacing the file while DiscordHass is running is
+fine — close it from the tray first.
+
+---
+
 ## Where things live on disk
 
 * **Configuration & cached tokens.**
@@ -269,6 +301,10 @@ Discord desktop ─┐                                ┌─► input_boolean.di
   Tokens (HA access token, Discord client secret + refresh token) are
   DPAPI-encrypted before being written. They can only be decrypted by the
   same Windows user account on the same machine.
+* **Update staging.**
+  `%LOCALAPPDATA%\DiscordHass\update\`
+  Downloaded update binaries land here briefly before they're swapped
+  into place. Safe to delete at any time.
 * **Autostart.**
   Registry value `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\DiscordHass`
   pointing at the current `DiscordHass.exe`. Toggle from the tray menu or

@@ -23,4 +23,23 @@ internal static class AppConstants
     //     stable; if it ever needs to change, every existing user must re-register the
     //     new URI in their Discord application, so do not change this lightly.
     public const string DiscordOAuthRedirectUri = "http://127.0.0.1:64064/discord/callback";
+
+    // GitHub coordinates for the auto-updater.
+    public const string GitHubOwner = "lischetzke";
+    public const string GitHubRepo  = "discord_hass_bridge";
+    public const string GitHubReleasesUrl = $"https://github.com/{GitHubOwner}/{GitHubRepo}/releases";
+
+    /// <summary>Returns the assembly's informational version (stripped of build metadata) or "0.0.0".</summary>
+    public static string GetVersionString()
+    {
+        System.Reflection.Assembly asm = typeof(AppConstants).Assembly;
+        System.Reflection.AssemblyInformationalVersionAttribute? info =
+            (System.Reflection.AssemblyInformationalVersionAttribute?)System.Attribute.GetCustomAttribute(
+                asm, typeof(System.Reflection.AssemblyInformationalVersionAttribute));
+        string v = info?.InformationalVersion
+                   ?? asm.GetName().Version?.ToString()
+                   ?? "0.0.0";
+        int plus = v.IndexOf('+');
+        return plus >= 0 ? v[..plus] : v;
+    }
 }

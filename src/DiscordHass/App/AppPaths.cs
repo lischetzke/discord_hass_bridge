@@ -15,6 +15,11 @@ internal static class AppPaths
 
     public static string LogFile { get; } = Path.Combine(AppDataDir, "discordhass.log");
 
+    public static string UpdateStagingDir { get; } = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        AppFolderName,
+        "update");
+
     public static void EnsureAppDataDirExists()
     {
         Directory.CreateDirectory(AppDataDir);

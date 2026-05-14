@@ -28,6 +28,10 @@ internal sealed class AppConfig
 
     public bool MinimizeToTrayOnClose { get; set; } = true;
 
+    public bool CheckUpdatesAutomatically { get; set; } = true;
+
+    public long LastUpdateCheckUnix { get; set; } = 0;
+
     public static readonly string[] DefaultEnabledFlags =
     {
         StateFlagIds.InCall,

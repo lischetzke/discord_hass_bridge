@@ -8,6 +8,7 @@ using DiscordHass.App;
 using DiscordHass.Config;
 using DiscordHass.Discord;
 using DiscordHass.HomeAssistant;
+using DiscordHass.Update;
 
 namespace DiscordHass.Ui;
 
@@ -16,6 +17,7 @@ internal sealed class SettingsForm : Form
     private readonly AppConfig _config;
     private readonly ConfigStore _configStore;
     private readonly BridgeService _bridge;
+    private readonly UpdateService _updates;
 
     // Home Assistant tab
     private TextBox _haUrlBox = null!;
@@ -37,6 +39,11 @@ internal sealed class SettingsForm : Form
     // General tab
     private CheckBox _autostartCheckbox = null!;
     private CheckBox _minimizeToTrayCheckbox = null!;
+    private CheckBox _autoUpdateCheckbox = null!;
+    private Label _currentVersionLabel = null!;
+    private Label _lastCheckedLabel = null!;
+    private Button _checkNowButton = null!;
+    private LinkLabel _releasesLink = null!;
 
     private sealed class FlagRow
     {
@@ -46,11 +53,12 @@ internal sealed class SettingsForm : Form
         public Label Preview { get; init; } = null!;
     }
 
-    public SettingsForm(AppConfig config, ConfigStore configStore, BridgeService bridge)
+    public SettingsForm(AppConfig config, ConfigStore configStore, BridgeService bridge, UpdateService updates)
     {
         _config = config;
         _configStore = configStore;
         _bridge = bridge;
+        _updates = updates;
 
         Text = $"{AppConstants.DisplayName} — Settings";
         Width = 760;
@@ -300,14 +308,95 @@ internal sealed class SettingsForm : Form
             Location = new Point(20, 56), AutoSize = true,
         };
 
-        Label version = new()
+        // --- Updates section ---
+        Label updatesHeader = new()
         {
-            Location = new Point(20, 110), AutoSize = true, ForeColor = Color.DimGray,
-            Text = $"{AppConstants.DisplayName} — version " + (System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "dev"),
+            Text = "Updates",
+            Location = new Point(20, 110), AutoSize = true,
+            Font = new Font(Font, FontStyle.Bold),
         };
+        _autoUpdateCheckbox = new CheckBox
+        {
+            Text = "Check for updates automatically (once per day)",
+            Location = new Point(20, 138), AutoSize = true,
+        };
+        _currentVersionLabel = new Label
+        {
+            Location = new Point(20, 170), AutoSize = true, ForeColor = Color.DimGray,
+            Text = $"Installed: v{AppConstants.GetVersionString()}",
+        };
+        _lastCheckedLabel = new Label
+        {
+            Location = new Point(20, 192), AutoSize = true, ForeColor = Color.DimGray,
+            Text = FormatLastChecked(),
+        };
+        _checkNowButton = new Button
+        {
+            Text = "Check now", Location = new Point(20, 220), Width = 160, Height = 28,
+        };
+        _checkNowButton.Click += async (_, _) => await OnCheckNowClickedAsync().ConfigureAwait(true);
 
-        page.Controls.AddRange(new Control[] { _autostartCheckbox, _minimizeToTrayCheckbox, version });
+        const string releasesUrl = AppConstants.GitHubReleasesUrl;
+        _releasesLink = new LinkLabel
+        {
+            Location = new Point(200, 226), AutoSize = true,
+            LinkColor = Color.SteelBlue, ActiveLinkColor = Color.RoyalBlue,
+            Text = "View all releases on GitHub",
+        };
+        _releasesLink.LinkClicked += (_, _) => OpenUrlInBrowser(releasesUrl);
+
+        page.Controls.AddRange(new Control[]
+        {
+            _autostartCheckbox, _minimizeToTrayCheckbox,
+            updatesHeader, _autoUpdateCheckbox, _currentVersionLabel, _lastCheckedLabel,
+            _checkNowButton, _releasesLink,
+        });
         return page;
+    }
+
+    private async Task OnCheckNowClickedAsync()
+    {
+        _checkNowButton.Enabled = false;
+        string priorText = _checkNowButton.Text;
+        _checkNowButton.Text = "Checking…";
+        try
+        {
+            bool found = await _updates.CheckNowAsync().ConfigureAwait(true);
+            _lastCheckedLabel.Text = FormatLastChecked();
+            if (found && _updates.Available is not null)
+            {
+                MessageBox.Show(this,
+                    $"Update available: {_updates.Available.TagName}\r\n\r\nRight-click the tray icon to install.",
+                    $"{AppConstants.DisplayName} — Update",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else if (_updates.State == UpdateState.Faulted)
+            {
+                MessageBox.Show(this,
+                    $"Update check failed: {_updates.LastError}",
+                    $"{AppConstants.DisplayName} — Update",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            else
+            {
+                MessageBox.Show(this,
+                    $"You're up to date (v{AppConstants.GetVersionString()}).",
+                    $"{AppConstants.DisplayName} — Update",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
+        finally
+        {
+            _checkNowButton.Text = priorText;
+            _checkNowButton.Enabled = true;
+        }
+    }
+
+    private string FormatLastChecked()
+    {
+        if (_config.LastUpdateCheckUnix <= 0) return "Last checked: never";
+        DateTimeOffset when = DateTimeOffset.FromUnixTimeSeconds(_config.LastUpdateCheckUnix).ToLocalTime();
+        return $"Last checked: {when:yyyy-MM-dd HH:mm}";
     }
 
     private void LoadValuesFromConfig()
@@ -330,6 +419,7 @@ internal sealed class SettingsForm : Form
 
         _autostartCheckbox.Checked = AutostartManager.IsEnabled();
         _minimizeToTrayCheckbox.Checked = _config.MinimizeToTrayOnClose;
+        _autoUpdateCheckbox.Checked = _config.CheckUpdatesAutomatically;
     }
 
     private void RefreshAllPreviews()
@@ -378,6 +468,7 @@ internal sealed class SettingsForm : Form
         }
 
         _config.MinimizeToTrayOnClose = _minimizeToTrayCheckbox.Checked;
+        _config.CheckUpdatesAutomatically = _autoUpdateCheckbox.Checked;
 
         try
         {
