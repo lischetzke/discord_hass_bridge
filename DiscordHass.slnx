@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DiscordHass/DiscordHass.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DiscordHass.Tests/DiscordHass.Tests.csproj" />
+  </Folder>
+</Solution>
