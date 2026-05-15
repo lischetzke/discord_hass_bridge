@@ -351,11 +351,48 @@ internal sealed class SettingsForm : Form
         };
         _releasesLink.LinkClicked += (_, _) => OpenUrlInBrowser(releasesUrl);
 
+        // --- Diagnostics section ---
+        Label diagHeader = new()
+        {
+            Text = "Diagnostics",
+            Location = new Point(20, 280), AutoSize = true,
+            Font = new Font(Font, FontStyle.Bold),
+        };
+        Label diagHint = new()
+        {
+            Location = new Point(20, 308), AutoSize = false, Width = 700, Height = 36,
+            ForeColor = Color.DimGray,
+            Text = "Every Discord IPC frame from this session is appended to rpc-events.log " +
+                   "in the config folder. Reproduce a problem (e.g. toggle your camera), then " +
+                   "open the folder to grab the log.",
+        };
+        Button openConfigFolderButton = new()
+        {
+            Text = "Open config folder", Location = new Point(20, 352), Width = 200, Height = 28,
+        };
+        openConfigFolderButton.Click += (_, _) =>
+        {
+            try
+            {
+                AppPaths.EnsureAppDataDirExists();
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = AppPaths.AppDataDir,
+                    UseShellExecute = true,
+                });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Could not open folder:\r\n{ex.Message}", AppConstants.DisplayName);
+            }
+        };
+
         page.Controls.AddRange(new Control[]
         {
             _autostartCheckbox, _minimizeToTrayCheckbox,
             updatesHeader, _autoUpdateCheckbox, _currentVersionLabel, _lastCheckedLabel,
             _checkNowButton, _releasesLink,
+            diagHeader, diagHint, openConfigFolderButton,
         });
         return page;
     }
@@ -413,7 +450,7 @@ internal sealed class SettingsForm : Form
         _discordClientSecretBox.Text = SecretProtector.Unprotect(_config.DiscordClientSecretProtected) ?? "";
 
         // Surface the current Discord authorization state so the user can see at a glance
-        // whether they need to re-authorize for new scopes (e.g. camera support added in 0.1.1).
+        // what scopes Discord actually granted vs. what the app requested.
         if (string.IsNullOrEmpty(_config.DiscordRefreshTokenProtected))
         {
             _discordStatusLabel.Text = "Not authorized. Click Authorize once Client ID and Client Secret are filled in.";
@@ -421,12 +458,28 @@ internal sealed class SettingsForm : Form
         }
         else if (!DiscordScopes.Matches(_config.DiscordAuthorizedScopeKey))
         {
-            _discordStatusLabel.Text = "Re-authorize required: cached tokens are for older permissions (camera state will not work until you click Authorize).";
+            _discordStatusLabel.Text = "Re-authorize required: cached tokens are for older permissions.";
             _discordStatusLabel.ForeColor = Color.OrangeRed;
+        }
+        else if (!string.IsNullOrEmpty(_config.DiscordGrantedScopes))
+        {
+            string granted = _config.DiscordGrantedScopes!;
+            bool videoOk = granted.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                .Any(s => string.Equals(s, DiscordScopes.RpcVideoRead, StringComparison.OrdinalIgnoreCase));
+            if (videoOk)
+            {
+                _discordStatusLabel.Text = $"Authorized. Granted scopes: {granted}";
+                _discordStatusLabel.ForeColor = Color.SeaGreen;
+            }
+            else
+            {
+                _discordStatusLabel.Text = $"Authorized but Discord did NOT grant rpc.video.read — camera state will not work. Granted: {granted}";
+                _discordStatusLabel.ForeColor = Color.Firebrick;
+            }
         }
         else
         {
-            _discordStatusLabel.Text = "Authorized — scopes up to date.";
+            _discordStatusLabel.Text = "Authorized.";
             _discordStatusLabel.ForeColor = Color.SeaGreen;
         }
 
@@ -585,6 +638,7 @@ internal sealed class SettingsForm : Form
             _config.DiscordAccessTokenExpiresAtUnix = tokens.ExpiresAt.ToUnixTimeSeconds();
             _config.DiscordRefreshTokenProtected = SecretProtector.Protect(tokens.RefreshToken);
             _config.DiscordAuthorizedScopeKey = DiscordScopes.CurrentKey();
+            _config.DiscordGrantedScopes = tokens.GrantedScopes;
             _configStore.Save(_config);
 
             _discordStatusLabel.ForeColor = Color.SeaGreen;

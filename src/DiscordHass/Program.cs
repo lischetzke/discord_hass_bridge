@@ -32,6 +32,7 @@ internal static class Program
         ApplicationConfiguration.Initialize();
 
         AppPaths.EnsureAppDataDirExists();
+        DiscordHass.Discord.RpcDebugLog.ResetForSession();
         ConfigStore configStore = new();
         AppConfig config = configStore.Load();
 

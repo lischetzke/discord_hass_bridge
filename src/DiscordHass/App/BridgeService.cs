@@ -376,6 +376,10 @@ internal sealed class BridgeService : IAsyncDisposable
         {
             _config.DiscordRefreshTokenProtected = SecretProtector.Protect(tokens.RefreshToken);
         }
+        if (!string.IsNullOrEmpty(tokens.GrantedScopes))
+        {
+            _config.DiscordGrantedScopes = tokens.GrantedScopes;
+        }
         _configStore.Save(_config);
         return tokens.AccessToken;
     }

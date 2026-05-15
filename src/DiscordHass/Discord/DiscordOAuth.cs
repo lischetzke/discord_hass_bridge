@@ -8,7 +8,7 @@ using System.Threading.Tasks;
 
 namespace DiscordHass.Discord;
 
-internal sealed record DiscordTokens(string AccessToken, string RefreshToken, DateTimeOffset ExpiresAt);
+internal sealed record DiscordTokens(string AccessToken, string RefreshToken, DateTimeOffset ExpiresAt, string? GrantedScopes);
 
 internal sealed class DiscordOAuth
 {
@@ -66,7 +66,8 @@ internal sealed class DiscordOAuth
         return new DiscordTokens(
             tr.AccessToken!,
             tr.RefreshToken ?? "",
-            DateTimeOffset.UtcNow.AddSeconds(tr.ExpiresIn > 0 ? tr.ExpiresIn : 604800));
+            DateTimeOffset.UtcNow.AddSeconds(tr.ExpiresIn > 0 ? tr.ExpiresIn : 604800),
+            tr.Scope);
     }
 
     private sealed class TokenResponse

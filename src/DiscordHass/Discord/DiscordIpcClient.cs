@@ -102,6 +102,7 @@ internal sealed class DiscordIpcClient : IAsyncDisposable
             ? new { cmd, nonce, args }
             : new { cmd, nonce, evt, args };
         string json = JsonSerializer.Serialize(payload, JsonOptions);
+        RpcDebugLog.LogSend(evt ?? cmd, json);
 
         try
         {
@@ -132,6 +133,7 @@ internal sealed class DiscordIpcClient : IAsyncDisposable
             while (!ct.IsCancellationRequested && pipe.IsConnected)
             {
                 DiscordIpcFrame frame = await DiscordIpcProtocol.ReadFrameAsync(pipe, ct).ConfigureAwait(false);
+                RpcDebugLog.LogRecv(frame.Op.ToString(), frame.Json);
                 switch (frame.Op)
                 {
                     case DiscordOpCode.Frame:
@@ -198,7 +200,9 @@ internal sealed class DiscordIpcClient : IAsyncDisposable
         // Unsolicited event (subscription delivery)
         if (!string.IsNullOrEmpty(msg.Evt) && msg.Evt != "READY")
         {
-            EventReceived?.Invoke(this, new DiscordIpcEvent(msg.Evt!, msg.Data ?? default));
+            JsonElement data = msg.Data ?? default;
+            RpcDebugLog.LogEvent(msg.Evt!, data.ValueKind == JsonValueKind.Undefined ? "(no data)" : data.GetRawText());
+            EventReceived?.Invoke(this, new DiscordIpcEvent(msg.Evt!, data));
         }
     }
 
