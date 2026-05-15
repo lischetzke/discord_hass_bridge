@@ -162,11 +162,8 @@ internal sealed class DiscordRpcSession : IAsyncDisposable
 
         _currentChannelId = newChannelId;
         VoiceState updated = _state.WithChannel(newChannelId);
-        if (newChannelId is null)
-        {
-            // Left the channel — clear camera (Discord turns video off when leaving)
-            updated = updated.WithSelfVideo(false);
-        }
+        // Camera state is managed by WindowsCameraWatcher (Discord RPC does not expose
+        // self_video to user-registered apps), so we deliberately do not touch it here.
         SetState(updated);
     }
 
@@ -226,10 +223,13 @@ internal sealed class DiscordRpcSession : IAsyncDisposable
             return;
         }
 
+        // SelfVideo is intentionally not consumed here — Discord's RPC voice_state object
+        // never includes self_video for user-registered applications, so the DTO field is
+        // always false and would clobber the OS-detected camera state managed in
+        // BridgeService. See CapabilityAccessParser for the OS-side mechanism.
         VoiceState updated = _state
             .WithSelfMute(dto.SelfMute)
             .WithSelfDeaf(dto.SelfDeaf)
-            .WithSelfVideo(dto.SelfVideo)
             .WithServerMute(dto.Mute)
             .WithServerDeaf(dto.Deaf);
         SetState(updated);
@@ -259,10 +259,10 @@ internal sealed class DiscordRpcSession : IAsyncDisposable
             if (entry.TryGetProperty("voice_state", out JsonElement vs)
                 && vs.Deserialize<DiscordVoiceStateDto>() is DiscordVoiceStateDto dto)
             {
+                // SelfVideo intentionally skipped — see HandleVoiceStateUpdate for context.
                 _state = _state
                     .WithSelfMute(dto.SelfMute)
                     .WithSelfDeaf(dto.SelfDeaf)
-                    .WithSelfVideo(dto.SelfVideo)
                     .WithServerMute(dto.Mute)
                     .WithServerDeaf(dto.Deaf);
             }

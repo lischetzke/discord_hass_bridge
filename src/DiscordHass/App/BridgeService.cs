@@ -38,13 +38,23 @@ internal sealed class BridgeService : IAsyncDisposable
     private DiscordRpcSession? _discord;
     private HaWebSocketClient? _ha;
     private HaHelperManager? _haHelpers;
+    private WindowsCameraWatcher? _cameraWatcher;
+
+    private VoiceState _voiceFromDiscord = VoiceState.Empty;
+    private bool _cameraFromOs;
 
     private VoiceState? _lastPublishedState;
     private readonly SemaphoreSlim _publishLock = new(1, 1);
 
     public ConnectionStatus DiscordStatus { get; } = new();
     public ConnectionStatus HaStatus { get; } = new();
-    public VoiceState CurrentVoiceState { get; private set; } = VoiceState.Empty;
+    /// <summary>
+    /// Merged state from both signal sources: voice fields (in-call, mic/speaker mute, server
+    /// mute/deaf) come from Discord RPC, while camera comes from the Windows Capability
+    /// Access Manager registry — Discord's RPC does not expose self_video to user-registered
+    /// applications.
+    /// </summary>
+    public VoiceState CurrentVoiceState => _voiceFromDiscord with { CameraOn = _cameraFromOs };
     public string? DiscordUserName { get; private set; }
 
     public event EventHandler? StatusChanged;
@@ -64,6 +74,11 @@ internal sealed class BridgeService : IAsyncDisposable
         }
 
         _cts = new CancellationTokenSource();
+
+        _cameraWatcher = new WindowsCameraWatcher();
+        _cameraWatcher.CameraStateChanged += OnCameraStateChanged;
+        _cameraWatcher.Start();
+
         _discordRunner = Task.Run(() => RunDiscordLoopAsync(_cts.Token));
         _haRunner = Task.Run(() => RunHaLoopAsync(_cts.Token));
     }
@@ -92,6 +107,13 @@ internal sealed class BridgeService : IAsyncDisposable
             try { await haRunner.ConfigureAwait(false); } catch { /* shutdown */ }
         }
 
+        if (_cameraWatcher is not null)
+        {
+            _cameraWatcher.CameraStateChanged -= OnCameraStateChanged;
+            await _cameraWatcher.DisposeAsync().ConfigureAwait(false);
+            _cameraWatcher = null;
+            _cameraFromOs = false;
+        }
         if (_discord is not null)
         {
             await _discord.DisposeAsync().ConfigureAwait(false);
@@ -133,7 +155,7 @@ internal sealed class BridgeService : IAsyncDisposable
                 await session.ConnectAsync(_config.DiscordClientId, accessToken, ct).ConfigureAwait(false);
                 _discord = session;
                 DiscordUserName = session.CurrentUserName;
-                CurrentVoiceState = session.CurrentState;
+                _voiceFromDiscord = session.CurrentState;
                 SetStatus(DiscordStatus, ConnectionPhase.Connected, null);
                 backoff = TimeSpan.FromSeconds(2);
 
@@ -260,7 +282,14 @@ internal sealed class BridgeService : IAsyncDisposable
 
     private void OnDiscordVoiceStateChanged(object? sender, VoiceState state)
     {
-        CurrentVoiceState = state;
+        _voiceFromDiscord = state;
+        VoiceStateChanged?.Invoke(this, EventArgs.Empty);
+        _ = PublishCurrentAsync(_cts.Token);
+    }
+
+    private void OnCameraStateChanged(object? sender, bool cameraOn)
+    {
+        _cameraFromOs = cameraOn;
         VoiceStateChanged?.Invoke(this, EventArgs.Empty);
         _ = PublishCurrentAsync(_cts.Token);
     }
@@ -317,7 +346,8 @@ internal sealed class BridgeService : IAsyncDisposable
         await _publishLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            CurrentVoiceState = VoiceState.Empty;
+            _voiceFromDiscord = VoiceState.Empty;
+            _cameraFromOs = false;
             List<EffectiveStateFlag> effective = FlagResolver.ResolveEnabled(_config).ToList();
             List<HelperUpdate> offs = StateMapper.ComputeAllOff(effective);
             foreach (HelperUpdate u in offs)

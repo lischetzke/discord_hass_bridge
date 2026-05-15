@@ -260,6 +260,23 @@ Discord desktop ─┐                                ┌─► input_boolean.di
   backoff capped at 30 seconds. If Discord disconnects (you quit it),
   DiscordHass flips every enabled helper to `off` so HA doesn't think you're
   still in a meeting.
+* **Camera state is OS-detected, not RPC-detected.** Discord's local RPC
+  intentionally strips the `voice_state` payload to five fields
+  (`mute, deaf, self_mute, self_deaf, suppress`) for user-registered
+  applications — there is no `self_video` field and no `VIDEO_STATE_UPDATE`
+  event, even with `rpc.video.read` granted. (`rpc.video.read` only
+  authorizes the write side, `TOGGLE_VIDEO`. Even Discord's whitelisted
+  partners — StreamKit, Streamdeck, Overlayed, Reactive Images — don't read
+  camera state via RPC.) So instead, DiscordHass watches HKCU's Capability
+  Access Manager registry:
+  `Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam\NonPackaged\<encoded-exe-path>`.
+  This is the same signal Windows itself uses to drive the "camera in use"
+  tray indicator. While the camera is active, `LastUsedTimeStop == 0`;
+  once Discord releases the camera, Windows writes the release timestamp
+  there. DiscordHass polls the relevant subkeys once per second, enumerates
+  any `Discord.exe` / `DiscordPTB.exe` / `DiscordCanary.exe` it finds, and
+  flips `input_boolean.discord_camera_on` accordingly. No admin required —
+  HKCU is fully readable from a normal user process.
 
 ---
 
@@ -398,8 +415,13 @@ tests/DiscordHass.Tests/
 
 ## Limitations
 
-* Windows only. Discord's IPC pipe paths and the autostart mechanism are
-  Windows-specific.
+* Windows only. Discord's IPC pipe paths, the autostart mechanism, and the
+  Capability Access Manager registry are all Windows-specific.
+* Camera detection only works for the standard (non-UWP) Discord installer,
+  i.e. `%LocalAppData%\Discord\`, `%LocalAppData%\DiscordPTB\`,
+  `%LocalAppData%\DiscordCanary\`. The (uncommon) Microsoft Store build of
+  Discord registers under a different registry root and is not currently
+  enumerated.
 * Screen-sharing isn't reflected — Discord's RPC voice state doesn't expose
   it cleanly.
 * One Discord account at a time per Windows user session (whichever account
