@@ -101,7 +101,7 @@ internal sealed class DiscordRpcSession : IAsyncDisposable
 
         JsonElement result = await _ipc.SendCommandAsync(
             "AUTHORIZE",
-            new { client_id = clientId, scopes = new[] { "rpc", "rpc.voice.read", "identify" } },
+            new { client_id = clientId, scopes = DiscordScopes.Required },
             ct).ConfigureAwait(false);
 
         if (result.ValueKind != JsonValueKind.Object || !result.TryGetProperty("code", out JsonElement codeEl))

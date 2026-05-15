@@ -21,9 +21,12 @@ internal sealed class StatusForm : Form
         _config = config;
         _bridge = bridge;
 
+        SuspendLayout();
+        AutoScaleDimensions = new SizeF(96F, 96F);
+        AutoScaleMode = AutoScaleMode.Dpi;
+
         Text = $"{AppConstants.DisplayName} — Status";
-        Width = 540;
-        Height = 460;
+        ClientSize = new Size(520, 420);
         StartPosition = FormStartPosition.CenterScreen;
         MinimizeBox = false;
         MaximizeBox = false;
@@ -58,6 +61,7 @@ internal sealed class StatusForm : Form
             _bridge.VoiceStateChanged -= OnAnyChange;
         };
 
+        ResumeLayout(performLayout: true);
         Refresh();
     }
 

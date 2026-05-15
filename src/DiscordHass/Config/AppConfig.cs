@@ -18,6 +18,9 @@ internal sealed class AppConfig
 
     public string? DiscordRefreshTokenProtected { get; set; }
 
+    /// <summary>Scope set the cached Discord tokens were issued for; null means "never authorized".</summary>
+    public string? DiscordAuthorizedScopeKey { get; set; }
+
     public string HelperPrefix { get; set; } = "Discord";
 
     public Dictionary<string, FlagOverride> FlagOverrides { get; set; } = new();

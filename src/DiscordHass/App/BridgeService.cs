@@ -337,6 +337,23 @@ internal sealed class BridgeService : IAsyncDisposable
 
     private async Task<string> EnsureDiscordAccessTokenAsync(CancellationToken ct)
     {
+        // Cached tokens were issued for a specific scope set. Discord's refresh flow only
+        // re-issues the original scopes, so a stale scope key here means the cached tokens
+        // cannot grant our current required permissions (e.g. rpc.video.read for camera state).
+        // Clear them so the user is forced through a fresh AUTHORIZE.
+        if (!string.IsNullOrEmpty(_config.DiscordRefreshTokenProtected)
+            && !DiscordScopes.Matches(_config.DiscordAuthorizedScopeKey))
+        {
+            _config.DiscordAccessTokenProtected = null;
+            _config.DiscordAccessTokenExpiresAtUnix = 0;
+            _config.DiscordRefreshTokenProtected = null;
+            _config.DiscordAuthorizedScopeKey = null;
+            try { _configStore.Save(_config); } catch { /* tolerate */ }
+            throw new DiscordIpcCommandException(
+                "Discord permissions changed in this version (camera state now requires re-authorization). " +
+                "Open Settings → Discord → Authorize.");
+        }
+
         DateTimeOffset now = DateTimeOffset.UtcNow;
         DateTimeOffset expiresAt = DateTimeOffset.FromUnixTimeSeconds(_config.DiscordAccessTokenExpiresAtUnix);
         string? cached = SecretProtector.Unprotect(_config.DiscordAccessTokenProtected);

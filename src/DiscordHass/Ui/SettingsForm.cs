@@ -60,9 +60,14 @@ internal sealed class SettingsForm : Form
         _bridge = bridge;
         _updates = updates;
 
+        SuspendLayout();
+        // Set autoscale BEFORE child controls go in — WinForms uses these as the design-time
+        // baseline and scales every Location/Size on child controls by (currentDpi / 96).
+        AutoScaleDimensions = new SizeF(96F, 96F);
+        AutoScaleMode = AutoScaleMode.Dpi;
+
         Text = $"{AppConstants.DisplayName} — Settings";
-        Width = 760;
-        Height = 600;
+        ClientSize = new Size(740, 560);
         StartPosition = FormStartPosition.CenterScreen;
         MinimizeBox = false;
         MaximizeBox = false;
@@ -72,6 +77,7 @@ internal sealed class SettingsForm : Form
         InitializeUi();
         LoadValuesFromConfig();
         RefreshAllPreviews();
+        ResumeLayout(performLayout: true);
     }
 
     private void InitializeUi()
@@ -406,6 +412,24 @@ internal sealed class SettingsForm : Form
         _discordClientIdBox.Text = _config.DiscordClientId;
         _discordClientSecretBox.Text = SecretProtector.Unprotect(_config.DiscordClientSecretProtected) ?? "";
 
+        // Surface the current Discord authorization state so the user can see at a glance
+        // whether they need to re-authorize for new scopes (e.g. camera support added in 0.1.1).
+        if (string.IsNullOrEmpty(_config.DiscordRefreshTokenProtected))
+        {
+            _discordStatusLabel.Text = "Not authorized. Click Authorize once Client ID and Client Secret are filled in.";
+            _discordStatusLabel.ForeColor = Color.DimGray;
+        }
+        else if (!DiscordScopes.Matches(_config.DiscordAuthorizedScopeKey))
+        {
+            _discordStatusLabel.Text = "Re-authorize required: cached tokens are for older permissions (camera state will not work until you click Authorize).";
+            _discordStatusLabel.ForeColor = Color.OrangeRed;
+        }
+        else
+        {
+            _discordStatusLabel.Text = "Authorized — scopes up to date.";
+            _discordStatusLabel.ForeColor = Color.SeaGreen;
+        }
+
         _helperPrefixBox.Text = _config.HelperPrefix ?? "";
 
         foreach (StateFlagDefinition def in StateFlagDefinitions.All)
@@ -560,6 +584,7 @@ internal sealed class SettingsForm : Form
             _config.DiscordAccessTokenProtected = SecretProtector.Protect(tokens.AccessToken);
             _config.DiscordAccessTokenExpiresAtUnix = tokens.ExpiresAt.ToUnixTimeSeconds();
             _config.DiscordRefreshTokenProtected = SecretProtector.Protect(tokens.RefreshToken);
+            _config.DiscordAuthorizedScopeKey = DiscordScopes.CurrentKey();
             _configStore.Save(_config);
 
             _discordStatusLabel.ForeColor = Color.SeaGreen;

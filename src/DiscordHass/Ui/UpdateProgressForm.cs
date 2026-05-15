@@ -24,9 +24,12 @@ internal sealed class UpdateProgressForm : Form
         _updates = updates;
         _target  = target;
 
+        SuspendLayout();
+        AutoScaleDimensions = new SizeF(96F, 96F);
+        AutoScaleMode = AutoScaleMode.Dpi;
+
         Text = $"{AppConstants.DisplayName} — Updating";
-        Width = 480;
-        Height = 220;
+        ClientSize = new Size(460, 180);
         StartPosition = FormStartPosition.CenterScreen;
         MinimizeBox = false;
         MaximizeBox = false;
@@ -87,6 +90,8 @@ internal sealed class UpdateProgressForm : Form
                 _cts.Cancel();
             }
         };
+
+        ResumeLayout(performLayout: true);
     }
 
     protected override async void OnShown(EventArgs e)
