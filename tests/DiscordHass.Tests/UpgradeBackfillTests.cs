@@ -6,49 +6,34 @@ namespace DiscordHass.Tests;
 
 public class UpgradeBackfillTests
 {
-    private static AppConfig Configured() => new()
-    {
-        HaBaseUrl                    = "http://homeassistant.local:8123",
-        HaTokenProtected             = "dpapi-blob-1",
-        DiscordClientId              = "1234567890",
-        DiscordRefreshTokenProtected = "dpapi-blob-2",
-    };
-
     [Fact]
-    public void LooksConfigured_True_WhenAllFourCredentialsPresent()
+    public void LooksConfigured_True_WhenHaUrlSet()
     {
-        Assert.True(Program.LooksConfigured(Configured()));
+        AppConfig c = new() { HaBaseUrl = "http://homeassistant.local:8123" };
+        Assert.True(Program.LooksConfigured(c));
     }
 
     [Fact]
-    public void LooksConfigured_False_WhenHaUrlMissing()
+    public void LooksConfigured_True_EvenWithMissingDiscordCredentials()
     {
-        AppConfig c = Configured();
-        c.HaBaseUrl = "";
-        Assert.False(Program.LooksConfigured(c));
+        // Long-time user whose Discord refresh token was cleared by the scope-mismatch
+        // logic in BridgeService (or by manually clicking "Clear cached tokens") should
+        // still be considered configured: they've used the app before, the wizard would
+        // be noise, and the Settings status chips make missing Discord setup obvious.
+        AppConfig c = new()
+        {
+            HaBaseUrl = "http://homeassistant.local:8123",
+            HaTokenProtected = "dpapi-blob",
+            DiscordClientId = "1234567890",
+            DiscordRefreshTokenProtected = null,
+        };
+        Assert.True(Program.LooksConfigured(c));
     }
 
     [Fact]
-    public void LooksConfigured_False_WhenHaTokenMissing()
+    public void LooksConfigured_False_WhenHaUrlEmpty()
     {
-        AppConfig c = Configured();
-        c.HaTokenProtected = null;
-        Assert.False(Program.LooksConfigured(c));
-    }
-
-    [Fact]
-    public void LooksConfigured_False_WhenClientIdMissing()
-    {
-        AppConfig c = Configured();
-        c.DiscordClientId = "";
-        Assert.False(Program.LooksConfigured(c));
-    }
-
-    [Fact]
-    public void LooksConfigured_False_WhenRefreshTokenMissing()
-    {
-        AppConfig c = Configured();
-        c.DiscordRefreshTokenProtected = null;
+        AppConfig c = new() { HaBaseUrl = "" };
         Assert.False(Program.LooksConfigured(c));
     }
 
@@ -56,16 +41,17 @@ public class UpgradeBackfillTests
     [InlineData(" ")]
     [InlineData("\t")]
     [InlineData("\n")]
-    public void LooksConfigured_False_WhenAnyFieldIsWhitespaceOnly(string blank)
+    public void LooksConfigured_False_WhenHaUrlIsWhitespaceOnly(string blank)
     {
-        AppConfig c = Configured();
-        c.HaBaseUrl = blank;
+        AppConfig c = new() { HaBaseUrl = blank };
         Assert.False(Program.LooksConfigured(c));
     }
 
     [Fact]
     public void LooksConfigured_False_OnFreshConfig()
     {
+        // Default AppConfig has HaBaseUrl = "", so a brand-new install still gets the
+        // first-run wizard.
         Assert.False(Program.LooksConfigured(new AppConfig()));
     }
 }

@@ -77,21 +77,42 @@ internal sealed class OnboardingWizardForm : Form
         _autoUpdate = _config.CheckUpdatesAutomatically;
 
         BuildLayout();
-        Render();
+        // Render the first step once the form has had a chance to lay out its child
+        // controls — otherwise _stepHost.ClientSize is still the default (200×100) and
+        // step content like the Welcome label ends up sized for an area smaller than the
+        // form. Subscribing to Shown rather than calling Render() inline guarantees the
+        // step host has its real docked size by the time we touch it.
+        Shown += (_, _) => Render();
         ResumeLayout(performLayout: true);
     }
 
     private void BuildLayout()
     {
+        // Root TableLayoutPanel: three rows (header / step host / button bar) so the dock
+        // order can't conspire to hide the button bar behind the Fill step host. This is
+        // the same lesson learned the hard way in OverviewForm and SettingsForm.
+        TableLayoutPanel root = new()
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 3,
+            BackColor = ThemeColors.Background,
+        };
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 60F));   // header
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));   // step content
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 60F));   // buttons
+
+        // === Header row ===
         Panel header = new()
         {
-            Dock = DockStyle.Top,
-            Height = 60,
+            Dock = DockStyle.Fill,
             BackColor = ThemeColors.Surface,
+            Margin = Padding.Empty,
         };
         _titleLabel = new Label
         {
-            Location = new Point(20, 14),
+            Location = new Point(20, 12),
             Font = new Font(Font.FontFamily, Font.Size + 4F, FontStyle.Bold),
             ForeColor = ThemeColors.OnSurface,
             AutoSize = true,
@@ -105,41 +126,89 @@ internal sealed class OnboardingWizardForm : Form
         header.Controls.Add(_titleLabel);
         header.Controls.Add(_stepIndicatorLabel);
 
-        Panel buttonBar = new()
+        // === Step host row ===
+        // Outer adds the padding, inner (the field) is what RenderXxx methods populate.
+        // Same trick as CollapsiblePanel: child controls in WinForms only respect their
+        // parent's Padding when they're docked or anchored, not when they use explicit
+        // Location values — so we wrap a padded outer Panel around an unpadded Fill
+        // inner Panel. Controls added to the inner at (0, 0) appear visually inset by
+        // the outer's padding, which gives the wizard step content its left/top margin.
+        Panel stepHostOuter = new()
         {
-            Dock = DockStyle.Bottom,
-            Height = 56,
-            BackColor = ThemeColors.Surface,
+            Dock = DockStyle.Fill,
+            BackColor = ThemeColors.Background,
+            Padding = new Padding(24, 18, 24, 12),
+            Margin = Padding.Empty,
         };
-        _backButton = MakeFlatButton("Back");
-        _backButton.Width = 100;
-        _backButton.Location = new Point(20, 14);
-        _backButton.Click += (_, _) => GoBack();
-        _skipButton = MakeFlatButton("Skip");
-        _skipButton.Width = 100;
-        _skipButton.Location = new Point(ClientSize.Width - 100 - 110 - 20, 14);
-        _skipButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        _skipButton.Click += (_, _) => GoNext();
-        _nextButton = MakeFlatButton("Next");
-        _nextButton.Width = 100;
-        _nextButton.Location = new Point(ClientSize.Width - 100 - 20, 14);
-        _nextButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        _nextButton.Click += async (_, _) => await OnNextClickedAsync().ConfigureAwait(true);
-
-        buttonBar.Controls.Add(_backButton);
-        buttonBar.Controls.Add(_skipButton);
-        buttonBar.Controls.Add(_nextButton);
-
         _stepHost = new Panel
         {
             Dock = DockStyle.Fill,
             BackColor = ThemeColors.Background,
-            Padding = new Padding(20, 12, 20, 12),
+        };
+        stepHostOuter.Controls.Add(_stepHost);
+
+        // === Button bar row ===
+        Panel buttonBar = new()
+        {
+            Dock = DockStyle.Fill,
+            BackColor = ThemeColors.Surface,
+            Margin = Padding.Empty,
         };
 
-        Controls.Add(_stepHost);
-        Controls.Add(buttonBar);
-        Controls.Add(header);
+        _backButton = MakeFlatButton("Back");
+        _backButton.Width = 100;
+        _backButton.Margin = Padding.Empty;
+        _backButton.Click += (_, _) => GoBack();
+
+        _skipButton = MakeFlatButton("Skip");
+        _skipButton.Width = 100;
+        _skipButton.Margin = new Padding(8, 0, 0, 0);
+        _skipButton.Click += (_, _) => GoNext();
+
+        _nextButton = MakeFlatButton("Next");
+        _nextButton.Width = 100;
+        _nextButton.Margin = new Padding(8, 0, 0, 0);
+        _nextButton.Click += async (_, _) => await OnNextClickedAsync().ConfigureAwait(true);
+
+        // Back left, Next/Skip right. Using FlowLayoutPanel for *both* slots so the
+        // Padding actually positions the children (a plain Panel ignores Padding for
+        // absolutely-positioned children — that's the bug that previously left the Back
+        // button stuck at (0, 0) of its slot).
+        FlowLayoutPanel leftSlot = new()
+        {
+            Dock = DockStyle.Left,
+            Width = 140,
+            FlowDirection = FlowDirection.LeftToRight,
+            BackColor = ThemeColors.Surface,
+            Padding = new Padding(20, 16, 0, 0),
+            WrapContents = false,
+        };
+        leftSlot.Controls.Add(_backButton);
+
+        FlowLayoutPanel rightSlot = new()
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.RightToLeft,
+            BackColor = ThemeColors.Surface,
+            Padding = new Padding(0, 16, 20, 0),
+            WrapContents = false,
+        };
+        rightSlot.Controls.Add(_nextButton);
+        rightSlot.Controls.Add(_skipButton);
+
+        buttonBar.Controls.Add(rightSlot);
+        buttonBar.Controls.Add(leftSlot);
+
+        // Place rows in the table and add the table to the form. TableLayoutPanel
+        // doesn't care about the order of Controls.Add for siblings — it places each
+        // child at its specified (column, row) coordinate.
+        root.Controls.Add(header, 0, 0);
+        root.Controls.Add(stepHostOuter, 0, 1);
+        root.Controls.Add(buttonBar, 0, 2);
+        Controls.Add(root);
+
+        // The Next button is the default action — pressing Enter should advance the wizard.
+        AcceptButton = _nextButton;
     }
 
     private void Render()
@@ -182,8 +251,7 @@ internal sealed class OnboardingWizardForm : Form
                 "mic_muted, speaker_muted, camera_on, etc.) and keeps them in sync with what " +
                 "Discord is doing. Use them in any automation that can read an input_boolean.\r\n\r\n" +
                 "Click Next when you're ready.",
-            Location = new Point(0, 0),
-            Size = new Size(_stepHost.ClientSize.Width - 40, _stepHost.ClientSize.Height - 40),
+            Dock = DockStyle.Fill,
             ForeColor = ThemeColors.OnSurface,
             AutoSize = false,
         };
@@ -201,7 +269,7 @@ internal sealed class OnboardingWizardForm : Form
         _haUrlBox = new TextBox
         {
             Location = new Point(0, 26),
-            Width = _stepHost.ClientSize.Width - 40,
+            Width = _stepHost.ClientSize.Width,
             Text = _haUrl,
             BackColor = ThemeColors.Surface,
             ForeColor = ThemeColors.OnSurface,
@@ -213,7 +281,7 @@ internal sealed class OnboardingWizardForm : Form
         _haTokenBox = new TextBox
         {
             Location = new Point(0, 84),
-            Width = _stepHost.ClientSize.Width - 40,
+            Width = _stepHost.ClientSize.Width,
             Text = _haToken,
             UseSystemPasswordChar = true,
             BackColor = ThemeColors.Surface,
@@ -255,7 +323,7 @@ internal sealed class OnboardingWizardForm : Form
         {
             Location = new Point(170, 124),
             AutoSize = false,
-            Size = new Size(_stepHost.ClientSize.Width - 210, 20),
+            Size = new Size(_stepHost.ClientSize.Width - 170, 20),
             Text = _haTestStatus,
             ForeColor = _haTestStatusColor == Color.Empty ? ThemeColors.OnSurfaceDim : _haTestStatusColor,
         };
@@ -307,7 +375,7 @@ internal sealed class OnboardingWizardForm : Form
             Text = $"Add this exact redirect URI in OAuth2 → Redirects: {AppConstants.DiscordOAuthRedirectUri}",
             Location = new Point(0, 52),
             AutoSize = false,
-            Size = new Size(_stepHost.ClientSize.Width - 40, 18),
+            Size = new Size(_stepHost.ClientSize.Width, 18),
             ForeColor = ThemeColors.OnSurfaceDim,
         };
 
@@ -316,7 +384,7 @@ internal sealed class OnboardingWizardForm : Form
         _discordIdBox = new TextBox
         {
             Location = new Point(0, 110),
-            Width = _stepHost.ClientSize.Width - 40,
+            Width = _stepHost.ClientSize.Width,
             Text = _discordClientId,
             BackColor = ThemeColors.Surface,
             ForeColor = ThemeColors.OnSurface,
@@ -328,7 +396,7 @@ internal sealed class OnboardingWizardForm : Form
         _discordSecretBox = new TextBox
         {
             Location = new Point(0, 168),
-            Width = _stepHost.ClientSize.Width - 40,
+            Width = _stepHost.ClientSize.Width,
             Text = _discordClientSecret,
             UseSystemPasswordChar = true,
             BackColor = ThemeColors.Surface,
@@ -343,7 +411,7 @@ internal sealed class OnboardingWizardForm : Form
         {
             Location = new Point(180, 208),
             AutoSize = false,
-            Size = new Size(_stepHost.ClientSize.Width - 220, 20),
+            Size = new Size(_stepHost.ClientSize.Width - 180, 20),
             Text = _discordAuthStatus,
             ForeColor = _discordAuthStatusColor == Color.Empty ? ThemeColors.OnSurfaceDim : _discordAuthStatusColor,
         };
@@ -452,8 +520,7 @@ internal sealed class OnboardingWizardForm : Form
                 $"  Start with Windows: {autostart}\r\n" +
                 $"  Auto-update:        {autoupdate}\r\n\r\n" +
                 "You can change any of these later from Settings.",
-            Location = new Point(0, 0),
-            Size = new Size(_stepHost.ClientSize.Width - 40, _stepHost.ClientSize.Height - 40),
+            Dock = DockStyle.Fill,
             ForeColor = ThemeColors.OnSurface,
             AutoSize = false,
         };

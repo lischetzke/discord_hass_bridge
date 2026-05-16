@@ -51,15 +51,22 @@ internal static class Program
     }
 
     /// <summary>
-    /// True when every credential the onboarding wizard would set is already present.
-    /// Strictly stronger than "have they used the app before?" — partial setups intentionally
-    /// still trigger the wizard so missing pieces get guided.
+    /// True when the user has used the app before, so the first-run wizard should be
+    /// suppressed. Originally this checked all four credentials (HA URL + HA token +
+    /// Discord client id + Discord refresh token), but that was too strict: BridgeService
+    /// clears <c>DiscordRefreshTokenProtected</c> whenever the required scope set changes
+    /// between versions (the v0.1.x → v0.2.0 drop of <c>rpc.video.read</c> hit exactly this
+    /// path), and the user's "Clear cached tokens" button does too. Both cases left
+    /// long-time users staring at a wizard despite having a perfectly working setup.
+    ///
+    /// The real signal we need is "has the user ever entered an HA URL". A non-empty
+    /// HaBaseUrl means they've gone through Settings at least once — they don't need the
+    /// wizard, and anything missing is clearly visible on the Settings section status
+    /// chips. Fresh installs (config.json freshly created) still have an empty HaBaseUrl
+    /// and correctly get the wizard.
     /// </summary>
     internal static bool LooksConfigured(AppConfig c) =>
-           !string.IsNullOrWhiteSpace(c.HaBaseUrl)
-        && !string.IsNullOrWhiteSpace(c.HaTokenProtected)
-        && !string.IsNullOrWhiteSpace(c.DiscordClientId)
-        && !string.IsNullOrWhiteSpace(c.DiscordRefreshTokenProtected);
+        !string.IsNullOrWhiteSpace(c.HaBaseUrl);
 
     private static void HandlePostUpdateArgs(string[] args)
     {
