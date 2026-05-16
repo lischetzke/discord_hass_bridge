@@ -12,6 +12,17 @@ using DiscordHass.Update;
 
 namespace DiscordHass.Ui;
 
+/// <summary>
+/// v0.2.0 Settings form. Replaces the old four-tab layout with a single scrollable surface
+/// of four <see cref="CollapsiblePanel"/> sections: General, Home Assistant, Discord, States.
+/// HA and Discord show a status chip on their header when configuration is missing or
+/// re-authorization is required, so the user can see what needs attention without opening
+/// each section.
+///
+/// The form is fully themed via <see cref="ThemeColors"/> — no more system-default light
+/// chrome leaking through in dark mode. Save / Cancel docked at the bottom; sections stack
+/// from the top.
+/// </summary>
 internal sealed class SettingsForm : Form
 {
     private readonly AppConfig _config;
@@ -19,24 +30,13 @@ internal sealed class SettingsForm : Form
     private readonly BridgeService _bridge;
     private readonly UpdateService _updates;
 
-    // Home Assistant tab
-    private TextBox _haUrlBox = null!;
-    private TextBox _haTokenBox = null!;
-    private Button _haTestButton = null!;
-    private Label _haStatusLabel = null!;
+    // Section panels.
+    private CollapsiblePanel _generalSection = null!;
+    private CollapsiblePanel _haSection = null!;
+    private CollapsiblePanel _discordSection = null!;
+    private CollapsiblePanel _statesSection = null!;
 
-    // Discord tab
-    private TextBox _discordClientIdBox = null!;
-    private TextBox _discordClientSecretBox = null!;
-    private Button _discordAuthorizeButton = null!;
-    private Button _discordRevokeButton = null!;
-    private Label _discordStatusLabel = null!;
-
-    // States tab
-    private TextBox _helperPrefixBox = null!;
-    private readonly Dictionary<string, FlagRow> _flagRows = new();
-
-    // General tab
+    // General controls.
     private CheckBox _autostartCheckbox = null!;
     private CheckBox _minimizeToTrayCheckbox = null!;
     private CheckBox _autoUpdateCheckbox = null!;
@@ -44,6 +44,41 @@ internal sealed class SettingsForm : Form
     private Label _lastCheckedLabel = null!;
     private Button _checkNowButton = null!;
     private LinkLabel _releasesLink = null!;
+    private Button _runSetupButton = null!;
+    private Button _copyDiagnosticsButton = null!;
+    private Button _openConfigFolderButton = null!;
+    private System.Windows.Forms.Timer? _perfTimer;
+    private Label _perfUptime = null!;
+    private Label _perfCpu = null!;
+    private Label _perfMemory = null!;
+    private Label _perfGc = null!;
+    private Label _perfThreadsHandles = null!;
+    private Label _perfDiscordEvents = null!;
+    private Label _perfHaFrames = null!;
+    private Label _perfCamera = null!;
+    private Label _perfReconnects = null!;
+    private Label _perfPublishes = null!;
+    private Label _perfLatency = null!;
+    private long _lastCpuSampleMs = -1;
+    private DateTime _lastCpuSampleWall = DateTime.MinValue;
+
+    // HA controls.
+    private TextBox _haUrlBox = null!;
+    private TextBox _haTokenBox = null!;
+    private Button _haTestButton = null!;
+    private Label _haStatusLabel = null!;
+
+    // Discord controls.
+    private TextBox _discordClientIdBox = null!;
+    private TextBox _discordClientSecretBox = null!;
+    private Button _discordAuthorizeButton = null!;
+    private Button _discordRevokeButton = null!;
+    private Button _copyRedirectButton = null!;
+    private Label _discordStatusLabel = null!;
+
+    // States controls.
+    private TextBox _helperPrefixBox = null!;
+    private readonly Dictionary<string, FlagRow> _flagRows = new();
 
     private sealed class FlagRow
     {
@@ -51,6 +86,7 @@ internal sealed class SettingsForm : Form
         public TextBox NameSuffix { get; init; } = null!;
         public TextBox Icon { get; init; } = null!;
         public Label Preview { get; init; } = null!;
+        public Button TestButton { get; init; } = null!;
     }
 
     public SettingsForm(AppConfig config, ConfigStore configStore, BridgeService bridge, UpdateService updates)
@@ -61,316 +97,230 @@ internal sealed class SettingsForm : Form
         _updates = updates;
 
         SuspendLayout();
-        // Set autoscale BEFORE child controls go in — WinForms uses these as the design-time
-        // baseline and scales every Location/Size on child controls by (currentDpi / 96).
         AutoScaleDimensions = new SizeF(96F, 96F);
         AutoScaleMode = AutoScaleMode.Dpi;
 
         Text = $"{AppConstants.DisplayName} — Settings";
-        ClientSize = new Size(740, 560);
+        ClientSize = new Size(820, 620);
         StartPosition = FormStartPosition.CenterScreen;
         MinimizeBox = false;
         MaximizeBox = false;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         ShowInTaskbar = true;
+        BackColor = ThemeColors.Background;
+        ForeColor = ThemeColors.OnSurface;
 
-        InitializeUi();
+        // Add the scrollable section host BEFORE the bottom save bar. WinForms applies
+        // Controls[Count-1] first when computing dock layout, so the save bar (added last,
+        // Dock=Bottom) carves out the bottom 56px first, and the section host (Dock=Fill,
+        // added first) then claims the area above it — meaning scrolled content can reach
+        // the bottom of the visible area without being hidden behind the save bar. Same
+        // class of bug that bit the Overview form earlier.
+        BuildSections();
+        BuildSaveBar();
         LoadValuesFromConfig();
         RefreshAllPreviews();
+        RefreshTestButtonsEnabled();
+        RefreshSectionStatusChips();
+
+        _bridge.StatusChanged += OnBridgeStatusChanged;
+        FormClosed += (_, _) =>
+        {
+            _bridge.StatusChanged -= OnBridgeStatusChanged;
+            _perfTimer?.Stop();
+            _perfTimer?.Dispose();
+        };
+
         ResumeLayout(performLayout: true);
     }
 
-    private void InitializeUi()
+    private void BuildSaveBar()
     {
-        TabControl tabs = new()
+        Panel bar = new()
         {
-            Dock = DockStyle.Top,
-            Height = ClientSize.Height - 56,
-            Padding = new Point(10, 4),
+            Dock = DockStyle.Bottom,
+            Height = 56,
+            BackColor = ThemeColors.Surface,
         };
-        tabs.TabPages.Add(BuildHomeAssistantTab());
-        tabs.TabPages.Add(BuildDiscordTab());
-        tabs.TabPages.Add(BuildStatesTab());
-        tabs.TabPages.Add(BuildGeneralTab());
-
-        Panel bottom = new() { Dock = DockStyle.Bottom, Height = 56 };
-        Button saveButton = new()
-        {
-            Text = "Save && Close",
-            Width = 120, Height = 28, Top = 14,
-            Anchor = AnchorStyles.Right | AnchorStyles.Top,
-        };
-        saveButton.Left = bottom.ClientSize.Width - saveButton.Width - 16;
-        saveButton.Click += (_, _) =>
+        Button save = MakeAction("Save && Close");
+        save.Click += (_, _) =>
         {
             SaveAll();
             _ = _bridge.RestartAsync();
             Close();
         };
-        Button cancelButton = new()
+        Button cancel = MakeAction("Cancel");
+        cancel.Click += (_, _) => Close();
+
+        FlowLayoutPanel right = new()
         {
-            Text = "Cancel",
-            Width = 100, Height = 28, Top = 14,
-            Anchor = AnchorStyles.Right | AnchorStyles.Top,
+            FlowDirection = FlowDirection.RightToLeft,
+            Dock = DockStyle.Fill,
+            BackColor = ThemeColors.Surface,
+            Padding = new Padding(0, 14, 16, 0),
+            WrapContents = false,
         };
-        cancelButton.Left = saveButton.Left - cancelButton.Width - 8;
-        cancelButton.Click += (_, _) => Close();
+        save.Margin = new Padding(8, 0, 0, 0);
+        cancel.Margin = new Padding(8, 0, 0, 0);
+        save.Width = 140;
+        right.Controls.Add(save);
+        right.Controls.Add(cancel);
 
-        bottom.Controls.Add(saveButton);
-        bottom.Controls.Add(cancelButton);
-
-        Controls.Add(tabs);
-        Controls.Add(bottom);
+        bar.Controls.Add(right);
+        Controls.Add(bar);
     }
 
-    private TabPage BuildHomeAssistantTab()
+    private void BuildSections()
     {
-        TabPage page = new("Home Assistant");
-
-        Label urlLabel = new() { Text = "Base URL (e.g. http://homeassistant.local:8123)", Location = new Point(16, 18), AutoSize = true };
-        _haUrlBox = new TextBox { Location = new Point(16, 40), Width = 690 };
-
-        Label tokenLabel = new() { Text = "Long-lived access token", Location = new Point(16, 76), AutoSize = true };
-        _haTokenBox = new TextBox { Location = new Point(16, 98), Width = 690, UseSystemPasswordChar = true };
-
-        _haTestButton = new Button { Text = "Test connection", Location = new Point(16, 134), Width = 160 };
-        _haTestButton.Click += async (_, _) => await TestHaConnectionAsync().ConfigureAwait(true);
-
-        _haStatusLabel = new Label
+        // Scrollable host that holds the four sections stacked top-down.
+        Panel scroll = new()
         {
-            Location = new Point(184, 138), AutoSize = false, Width = 522, Height = 24,
-            Text = "", ForeColor = Color.DimGray,
+            Dock = DockStyle.Fill,
+            AutoScroll = true,
+            BackColor = ThemeColors.Background,
+            Padding = new Padding(20, 20, 20, 20),
         };
 
-        Label hint = new()
+        _statesSection  = new CollapsiblePanel("States")          { Dock = DockStyle.Top };
+        _discordSection = new CollapsiblePanel("Discord")         { Dock = DockStyle.Top };
+        _haSection      = new CollapsiblePanel("Home Assistant")  { Dock = DockStyle.Top };
+        _generalSection = new CollapsiblePanel("General")         { Dock = DockStyle.Top };
+
+        BuildGeneralContent(_generalSection.ContentArea);
+        BuildHaContent(_haSection.ContentArea);
+        BuildDiscordContent(_discordSection.ContentArea);
+        BuildStatesContent(_statesSection.ContentArea);
+
+        // ContentHeight values must clear the bottom-most control in each section's
+        // BuildXxxContent method PLUS the CollapsiblePanel's vertical padding (12 top +
+        // 18 bottom = 30 px eaten). General runs to y≈510, Discord status label to
+        // y≈260, States' test-hint help icon to y≈388.
+        _generalSection.ContentHeight = 560;
+        _haSection.ContentHeight = 220;
+        _discordSection.ContentHeight = 320;
+        _statesSection.ContentHeight = 440;
+
+        // Default expanded section. Open General because that's the safe, no-action-required area.
+        _generalSection.Expanded = true;
+
+        // Re-show chips on header resize.
+        foreach (CollapsiblePanel s in new[] { _generalSection, _haSection, _discordSection, _statesSection })
         {
-            Location = new Point(16, 184), AutoSize = false, Width = 690, Height = 32,
-            ForeColor = Color.DimGray,
-            Text = "Create a long-lived access token from your Home Assistant profile page → Security → Long-lived access tokens. " +
-                   "The token user must have permission to create input_boolean helpers (admin role).",
-        };
-
-        page.Controls.AddRange(new Control[] { urlLabel, _haUrlBox, tokenLabel, _haTokenBox, _haTestButton, _haStatusLabel, hint });
-        return page;
-    }
-
-    private TabPage BuildDiscordTab()
-    {
-        TabPage page = new("Discord");
-
-        Label idLabel = new() { Text = "Client ID", Location = new Point(16, 18), AutoSize = true };
-        _discordClientIdBox = new TextBox { Location = new Point(16, 40), Width = 690 };
-
-        Label secretLabel = new() { Text = "Client Secret", Location = new Point(16, 76), AutoSize = true };
-        _discordClientSecretBox = new TextBox { Location = new Point(16, 98), Width = 690, UseSystemPasswordChar = true };
-
-        _discordAuthorizeButton = new Button { Text = "Authorize…", Location = new Point(16, 134), Width = 160 };
-        _discordAuthorizeButton.Click += async (_, _) => await AuthorizeDiscordAsync().ConfigureAwait(true);
-
-        _discordRevokeButton = new Button { Text = "Clear cached tokens", Location = new Point(184, 134), Width = 180 };
-        _discordRevokeButton.Click += (_, _) =>
-        {
-            _config.DiscordAccessTokenProtected = null;
-            _config.DiscordAccessTokenExpiresAtUnix = 0;
-            _config.DiscordRefreshTokenProtected = null;
-            _configStore.Save(_config);
-            _discordStatusLabel.Text = "Cached tokens cleared. Re-authorize to reconnect.";
-            _discordStatusLabel.ForeColor = Color.DimGray;
-        };
-
-        _discordStatusLabel = new Label
-        {
-            Location = new Point(16, 180), AutoSize = false, Width = 690, Height = 24,
-            Text = "", ForeColor = Color.DimGray,
-        };
-
-        const string discordDevUrl = "https://discord.com/developers/applications";
-        string hintText = $"Register a Discord application at {discordDevUrl} → " +
-                          "copy the Application ID (Client ID) and reset/copy the Client Secret. " +
-                          "Click Authorize to grant the app access via Discord's approval modal.";
-        LinkLabel hint = new()
-        {
-            Location = new Point(16, 220), AutoSize = false, Width = 690, Height = 60,
-            ForeColor = Color.DimGray,
-            LinkColor = Color.SteelBlue,
-            ActiveLinkColor = Color.RoyalBlue,
-            Text = hintText,
-            LinkArea = new LinkArea(hintText.IndexOf(discordDevUrl, StringComparison.Ordinal), discordDevUrl.Length),
-        };
-        hint.LinkClicked += (_, _) => OpenUrlInBrowser(discordDevUrl);
-
-        page.Controls.AddRange(new Control[]
-        {
-            idLabel, _discordClientIdBox, secretLabel, _discordClientSecretBox,
-            _discordAuthorizeButton, _discordRevokeButton, _discordStatusLabel, hint,
-        });
-        return page;
-    }
-
-    private static void OpenUrlInBrowser(string url)
-    {
-        try
-        {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo { FileName = url, UseShellExecute = true });
-        }
-        catch
-        {
-            // user can copy the URL from the label text if launch fails
-        }
-    }
-
-    private TabPage BuildStatesTab()
-    {
-        TabPage page = new("States");
-
-        Label intro = new()
-        {
-            Text = "Customize the friendly name prefix and per-flag suffix and icon. " +
-                   "If a helper already exists in Home Assistant, the bridge will rename it to match — " +
-                   "automations referencing the old entity_id will need to be updated.",
-            Location = new Point(16, 14), Width = 700, Height = 36,
-            AutoSize = false, ForeColor = Color.DimGray,
-        };
-        page.Controls.Add(intro);
-
-        Label prefixLabel = new() { Text = "Helper name prefix", Location = new Point(16, 60), AutoSize = true };
-        _helperPrefixBox = new TextBox { Location = new Point(180, 56), Width = 200 };
-        _helperPrefixBox.TextChanged += (_, _) => RefreshAllPreviews();
-        page.Controls.Add(prefixLabel);
-        page.Controls.Add(_helperPrefixBox);
-
-        // Column headers
-        int headerY = 96;
-        page.Controls.Add(new Label { Text = "Enabled",   Location = new Point(16, headerY),  AutoSize = true, Font = new Font(Font, FontStyle.Bold) });
-        page.Controls.Add(new Label { Text = "Name",      Location = new Point(86, headerY),  AutoSize = true, Font = new Font(Font, FontStyle.Bold) });
-        page.Controls.Add(new Label { Text = "Icon",      Location = new Point(236, headerY), AutoSize = true, Font = new Font(Font, FontStyle.Bold) });
-        page.Controls.Add(new Label { Text = "Entity ID", Location = new Point(412, headerY), AutoSize = true, Font = new Font(Font, FontStyle.Bold) });
-
-        int y = headerY + 22;
-        foreach (StateFlagDefinition def in StateFlagDefinitions.All)
-        {
-            CheckBox enabled = new()
-            {
-                Location = new Point(28, y + 4),
-                AutoSize = true,
-                Text = "",
-            };
-            TextBox nameBox = new() { Location = new Point(86, y), Width = 140 };
-            nameBox.TextChanged += (_, _) => RefreshRowPreview(def.FlagId);
-
-            TextBox iconBox = new() { Location = new Point(236, y), Width = 160 };
-
-            Label preview = new()
-            {
-                Location = new Point(412, y + 3), AutoSize = false, Width = 300, Height = 20,
-                ForeColor = Color.DimGray, Text = "",
-            };
-
-            page.Controls.Add(enabled);
-            page.Controls.Add(nameBox);
-            page.Controls.Add(iconBox);
-            page.Controls.Add(preview);
-
-            _flagRows[def.FlagId] = new FlagRow
-            {
-                Enabled = enabled,
-                NameSuffix = nameBox,
-                Icon = iconBox,
-                Preview = preview,
-            };
-            y += 30;
+            s.ExpansionChanged += (_, _) => RefreshSectionStatusChips();
         }
 
-        const string mdiUrl = "https://pictogrammers.com/library/mdi/";
-        string iconHintText = "Tip: icons use Material Design Icons names like mdi:phone-in-talk. " +
-                              $"Browse the full set at {mdiUrl}.";
-        LinkLabel iconHint = new()
-        {
-            Location = new Point(16, y + 8), AutoSize = false, Width = 700, Height = 36,
-            ForeColor = Color.DimGray,
-            LinkColor = Color.SteelBlue,
-            ActiveLinkColor = Color.RoyalBlue,
-            Text = iconHintText,
-            LinkArea = new LinkArea(iconHintText.IndexOf(mdiUrl, StringComparison.Ordinal), mdiUrl.Length),
-        };
-        iconHint.LinkClicked += (_, _) => OpenUrlInBrowser(mdiUrl);
-        page.Controls.Add(iconHint);
+        // Bottom of the scrollable area lives at the top z-order so we add sections in
+        // reverse stack order: bottommost first.
+        scroll.Controls.Add(_statesSection);
+        scroll.Controls.Add(_discordSection);
+        scroll.Controls.Add(_haSection);
+        scroll.Controls.Add(_generalSection);
 
-        return page;
+        Controls.Add(scroll);
     }
 
-    private TabPage BuildGeneralTab()
+    // ===== General section =====
+
+    private void BuildGeneralContent(Panel host)
     {
-        TabPage page = new("General");
+        host.SuspendLayout();
+        int y = 4;
 
         _autostartCheckbox = new CheckBox
         {
             Text = "Start with Windows (sign-in)",
-            Location = new Point(20, 24), AutoSize = true,
+            Location = new Point(0, y), AutoSize = true, ForeColor = ThemeColors.OnSurface,
         };
+        host.Controls.Add(_autostartCheckbox);
+        y += 28;
+
         _minimizeToTrayCheckbox = new CheckBox
         {
             Text = "Minimize to tray when closing settings window",
-            Location = new Point(20, 56), AutoSize = true,
+            Location = new Point(0, y), AutoSize = true, ForeColor = ThemeColors.OnSurface,
         };
+        host.Controls.Add(_minimizeToTrayCheckbox);
+        y += 32;
 
-        // --- Updates section ---
-        Label updatesHeader = new()
+        _runSetupButton = MakeAction("Run setup wizard again…");
+        _runSetupButton.Width = 220;
+        _runSetupButton.Location = new Point(0, y);
+        _runSetupButton.Click += (_, _) =>
         {
-            Text = "Updates",
-            Location = new Point(20, 110), AutoSize = true,
-            Font = new Font(Font, FontStyle.Bold),
+            using OnboardingWizardForm wiz = new(_config, _configStore, _bridge);
+            wiz.ShowDialog(this);
+            LoadValuesFromConfig();
+            RefreshSectionStatusChips();
         };
+        host.Controls.Add(_runSetupButton);
+        y += 44;
+
+        // ---- Updates subsection ----
+        Label updatesHeader = MakeSubsectionHeader("Updates");
+        updatesHeader.Location = new Point(0, y);
+        host.Controls.Add(updatesHeader);
+        y += 26;
+
         _autoUpdateCheckbox = new CheckBox
         {
             Text = "Check for updates automatically (once per day)",
-            Location = new Point(20, 138), AutoSize = true,
+            Location = new Point(0, y), AutoSize = true, ForeColor = ThemeColors.OnSurface,
         };
+        host.Controls.Add(_autoUpdateCheckbox);
+        y += 28;
+
         _currentVersionLabel = new Label
         {
-            Location = new Point(20, 170), AutoSize = true, ForeColor = Color.DimGray,
+            Location = new Point(0, y), AutoSize = true, ForeColor = ThemeColors.OnSurfaceDim,
             Text = $"Installed: v{AppConstants.GetVersionString()}",
         };
+        host.Controls.Add(_currentVersionLabel);
+        y += 22;
+
         _lastCheckedLabel = new Label
         {
-            Location = new Point(20, 192), AutoSize = true, ForeColor = Color.DimGray,
+            Location = new Point(0, y), AutoSize = true, ForeColor = ThemeColors.OnSurfaceDim,
             Text = FormatLastChecked(),
         };
-        _checkNowButton = new Button
-        {
-            Text = "Check now", Location = new Point(20, 220), Width = 160, Height = 28,
-        };
-        _checkNowButton.Click += async (_, _) => await OnCheckNowClickedAsync().ConfigureAwait(true);
+        host.Controls.Add(_lastCheckedLabel);
+        y += 28;
 
-        const string releasesUrl = AppConstants.GitHubReleasesUrl;
+        _checkNowButton = MakeAction("Check now");
+        _checkNowButton.Location = new Point(0, y);
+        _checkNowButton.Click += async (_, _) => await OnCheckNowClickedAsync().ConfigureAwait(true);
+        host.Controls.Add(_checkNowButton);
+
         _releasesLink = new LinkLabel
         {
-            Location = new Point(200, 226), AutoSize = true,
-            LinkColor = Color.SteelBlue, ActiveLinkColor = Color.RoyalBlue,
+            Location = new Point(180, y + 6), AutoSize = true,
+            LinkColor = ThemeColors.Accent, ActiveLinkColor = ThemeColors.Accent,
+            BackColor = ThemeColors.Background,
             Text = "View all releases on GitHub",
         };
-        _releasesLink.LinkClicked += (_, _) => OpenUrlInBrowser(releasesUrl);
+        _releasesLink.LinkClicked += (_, _) => OpenUrlInBrowser(AppConstants.GitHubReleasesUrl);
+        host.Controls.Add(_releasesLink);
+        y += 44;
 
-        // --- Diagnostics section ---
-        Label diagHeader = new()
-        {
-            Text = "Diagnostics",
-            Location = new Point(20, 280), AutoSize = true,
-            Font = new Font(Font, FontStyle.Bold),
-        };
+        // ---- Diagnostics subsection ----
+        Label diagHeader = MakeSubsectionHeader("Diagnostics");
+        diagHeader.Location = new Point(0, y);
+        host.Controls.Add(diagHeader);
+        y += 26;
+
         Label diagHint = new()
         {
-            Location = new Point(20, 308), AutoSize = false, Width = 700, Height = 36,
-            ForeColor = Color.DimGray,
-            Text = "Every Discord IPC frame from this session is appended to rpc-events.log " +
-                   "in the config folder. Reproduce a problem (e.g. toggle your camera), then " +
-                   "open the folder to grab the log.",
+            Location = new Point(0, y), AutoSize = false, Size = new Size(740, 36),
+            ForeColor = ThemeColors.OnSurfaceDim,
+            Text = "Every Discord IPC frame is appended to rpc-events.log. Copy diagnostics packs " +
+                   "that log + a redacted config + a performance snapshot into a sharable zip.",
         };
-        Button openConfigFolderButton = new()
-        {
-            Text = "Open config folder", Location = new Point(20, 352), Width = 200, Height = 28,
-        };
-        openConfigFolderButton.Click += (_, _) =>
+        host.Controls.Add(diagHint);
+        y += 40;
+
+        _openConfigFolderButton = MakeAction("Open config folder");
+        _openConfigFolderButton.Width = 180;
+        _openConfigFolderButton.Location = new Point(0, y);
+        _openConfigFolderButton.Click += (_, _) =>
         {
             try
             {
@@ -386,16 +336,659 @@ internal sealed class SettingsForm : Form
                 MessageBox.Show(this, $"Could not open folder:\r\n{ex.Message}", AppConstants.DisplayName);
             }
         };
+        host.Controls.Add(_openConfigFolderButton);
 
-        page.Controls.AddRange(new Control[]
+        _copyDiagnosticsButton = MakeAction("Copy diagnostics…");
+        _copyDiagnosticsButton.Width = 180;
+        _copyDiagnosticsButton.Location = new Point(196, y);
+        _copyDiagnosticsButton.Click += (_, _) => CreateAndShowDiagnostics();
+        host.Controls.Add(_copyDiagnosticsButton);
+        y += 40;
+
+        // ---- Performance subsection ----
+        Label perfHeader = MakeSubsectionHeader("Performance");
+        perfHeader.Location = new Point(0, y);
+        host.Controls.Add(perfHeader);
+
+        HelpHintIcon perfHelp = new(HelpContent.TopicIds.GeneralPerformance);
+        host.Controls.Add(perfHeader);
+        host.Controls.Add(perfHelp);
+        perfHelp.AlignWithLabel(perfHeader);
+        y += 26;
+
+        _perfUptime         = MakePerfLabel(0,   y);
+        _perfCpu            = MakePerfLabel(0,   y + 20);
+        _perfMemory         = MakePerfLabel(0,   y + 40);
+        _perfGc             = MakePerfLabel(0,   y + 60);
+        _perfThreadsHandles = MakePerfLabel(0,   y + 80);
+        _perfDiscordEvents  = MakePerfLabel(360, y);
+        _perfHaFrames       = MakePerfLabel(360, y + 20);
+        _perfCamera         = MakePerfLabel(360, y + 40);
+        _perfReconnects     = MakePerfLabel(360, y + 60);
+        _perfPublishes      = MakePerfLabel(360, y + 80);
+        _perfLatency        = new Label
         {
-            _autostartCheckbox, _minimizeToTrayCheckbox,
-            updatesHeader, _autoUpdateCheckbox, _currentVersionLabel, _lastCheckedLabel,
-            _checkNowButton, _releasesLink,
-            diagHeader, diagHint, openConfigFolderButton,
+            Location = new Point(0, y + 104), AutoSize = false, Size = new Size(740, 18),
+            ForeColor = ThemeColors.OnSurfaceDim,
+        };
+        host.Controls.AddRange(new Control[] {
+            _perfUptime, _perfCpu, _perfMemory, _perfGc, _perfThreadsHandles,
+            _perfDiscordEvents, _perfHaFrames, _perfCamera, _perfReconnects, _perfPublishes,
+            _perfLatency,
         });
-        return page;
+
+        _perfTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+        _perfTimer.Tick += (_, _) => RefreshPerformance();
+        RefreshPerformance();
+        _perfTimer.Start();
+
+        host.ResumeLayout(performLayout: true);
     }
+
+    // ===== HA section =====
+
+    private void BuildHaContent(Panel host)
+    {
+        host.SuspendLayout();
+
+        Label urlLabel = new()
+        {
+            Text = "Base URL (e.g. http://homeassistant.local:8123)",
+            Location = new Point(0, 4), AutoSize = true,
+            ForeColor = ThemeColors.OnSurface,
+        };
+        HelpHintIcon urlHelp = new(HelpContent.TopicIds.HaUrl);
+        host.Controls.Add(urlLabel);
+        host.Controls.Add(urlHelp);
+        urlHelp.AlignWithLabel(urlLabel);
+
+        _haUrlBox = new TextBox
+        {
+            Location = new Point(0, 30),
+            Width = 740,
+            BackColor = ThemeColors.Surface,
+            ForeColor = ThemeColors.OnSurface,
+            BorderStyle = BorderStyle.FixedSingle,
+        };
+        _haUrlBox.TextChanged += (_, _) => RefreshSectionStatusChips();
+        host.Controls.Add(_haUrlBox);
+
+        Label tokenLabel = new()
+        {
+            Text = "Long-lived access token",
+            Location = new Point(0, 66), AutoSize = true,
+            ForeColor = ThemeColors.OnSurface,
+        };
+        HelpHintIcon tokenHelp = new(HelpContent.TopicIds.HaToken);
+        host.Controls.Add(tokenLabel);
+        host.Controls.Add(tokenHelp);
+        tokenHelp.AlignWithLabel(tokenLabel);
+
+        _haTokenBox = new TextBox
+        {
+            Location = new Point(0, 92),
+            Width = 740,
+            UseSystemPasswordChar = true,
+            BackColor = ThemeColors.Surface,
+            ForeColor = ThemeColors.OnSurface,
+            BorderStyle = BorderStyle.FixedSingle,
+        };
+        _haTokenBox.TextChanged += (_, _) => RefreshSectionStatusChips();
+        host.Controls.Add(_haTokenBox);
+
+        _haTestButton = MakeAction("Test connection");
+        _haTestButton.Width = 160;
+        _haTestButton.Location = new Point(0, 128);
+        _haTestButton.Click += async (_, _) => await TestHaConnectionAsync().ConfigureAwait(true);
+        host.Controls.Add(_haTestButton);
+
+        _haStatusLabel = new Label
+        {
+            Location = new Point(176, 132), AutoSize = false, Size = new Size(560, 24),
+            Text = "", ForeColor = ThemeColors.OnSurfaceDim,
+        };
+        host.Controls.Add(_haStatusLabel);
+
+        host.ResumeLayout(performLayout: true);
+    }
+
+    // ===== Discord section =====
+
+    private void BuildDiscordContent(Panel host)
+    {
+        host.SuspendLayout();
+
+        Label idLabel = new()
+        {
+            Text = "Client ID",
+            Location = new Point(0, 4), AutoSize = true,
+            ForeColor = ThemeColors.OnSurface,
+        };
+        HelpHintIcon idHelp = new(HelpContent.TopicIds.DiscordClientId);
+        Button registrationGuideButton = MakeAction("How do I get this?");
+        registrationGuideButton.Width = 170;
+        registrationGuideButton.Click += (_, _) => HelpDialog.ShowTopic(this, HelpContent.TopicIds.DiscordRegistrationGuide);
+
+        host.Controls.Add(idLabel);
+        host.Controls.Add(idHelp);
+        idHelp.AlignWithLabel(idLabel);
+        registrationGuideButton.Location = new Point(idHelp.Right + 14, idLabel.Top - 4);
+        host.Controls.Add(registrationGuideButton);
+
+        _discordClientIdBox = new TextBox
+        {
+            Location = new Point(0, 30),
+            Width = 740,
+            BackColor = ThemeColors.Surface,
+            ForeColor = ThemeColors.OnSurface,
+            BorderStyle = BorderStyle.FixedSingle,
+        };
+        _discordClientIdBox.TextChanged += (_, _) => RefreshSectionStatusChips();
+        host.Controls.Add(_discordClientIdBox);
+
+        Label secretLabel = new()
+        {
+            Text = "Client Secret",
+            Location = new Point(0, 66), AutoSize = true,
+            ForeColor = ThemeColors.OnSurface,
+        };
+        HelpHintIcon secretHelp = new(HelpContent.TopicIds.DiscordClientSecret);
+        host.Controls.Add(secretLabel);
+        host.Controls.Add(secretHelp);
+        secretHelp.AlignWithLabel(secretLabel);
+
+        _discordClientSecretBox = new TextBox
+        {
+            Location = new Point(0, 92),
+            Width = 740,
+            UseSystemPasswordChar = true,
+            BackColor = ThemeColors.Surface,
+            ForeColor = ThemeColors.OnSurface,
+            BorderStyle = BorderStyle.FixedSingle,
+        };
+        host.Controls.Add(_discordClientSecretBox);
+
+        _discordAuthorizeButton = MakeAction("Authorize…");
+        _discordAuthorizeButton.Width = 160;
+        _discordAuthorizeButton.Location = new Point(0, 128);
+        _discordAuthorizeButton.Click += async (_, _) => await AuthorizeDiscordAsync().ConfigureAwait(true);
+        host.Controls.Add(_discordAuthorizeButton);
+
+        _discordRevokeButton = MakeAction("Clear cached tokens");
+        _discordRevokeButton.Width = 180;
+        _discordRevokeButton.Location = new Point(176, 128);
+        _discordRevokeButton.Click += (_, _) =>
+        {
+            _config.DiscordAccessTokenProtected = null;
+            _config.DiscordAccessTokenExpiresAtUnix = 0;
+            _config.DiscordRefreshTokenProtected = null;
+            _configStore.Save(_config);
+            _discordStatusLabel.Text = "Cached tokens cleared. Re-authorize to reconnect.";
+            _discordStatusLabel.ForeColor = ThemeColors.OnSurfaceDim;
+            RefreshSectionStatusChips();
+        };
+        host.Controls.Add(_discordRevokeButton);
+
+        _copyRedirectButton = MakeAction("Copy redirect URI");
+        _copyRedirectButton.Width = 170;
+        _copyRedirectButton.Location = new Point(370, 128);
+        _copyRedirectButton.Click += (_, _) =>
+        {
+            try { Clipboard.SetText(AppConstants.DiscordOAuthRedirectUri); } catch { /* best effort */ }
+        };
+        host.Controls.Add(_copyRedirectButton);
+
+        Label redirectHint = new()
+        {
+            Location = new Point(0, 170), AutoSize = false, Size = new Size(740, 32),
+            ForeColor = ThemeColors.OnSurfaceDim,
+            Text = $"Redirect URI to paste into Discord → OAuth2 → Redirects:\r\n{AppConstants.DiscordOAuthRedirectUri}",
+        };
+        host.Controls.Add(redirectHint);
+
+        _discordStatusLabel = new Label
+        {
+            Location = new Point(0, 212), AutoSize = false, Size = new Size(740, 48),
+            Text = "", ForeColor = ThemeColors.OnSurfaceDim,
+        };
+        host.Controls.Add(_discordStatusLabel);
+
+        host.ResumeLayout(performLayout: true);
+    }
+
+    // ===== States section =====
+
+    private void BuildStatesContent(Panel host)
+    {
+        host.SuspendLayout();
+
+        Label intro = new()
+        {
+            Text = "Helpers DiscordHass mirrors into Home Assistant. Toggle the checkbox to " +
+                   "enable/disable publishing. Renaming a helper here will rename the matching " +
+                   "input_boolean in HA on next reconnect.",
+            Location = new Point(0, 0), AutoSize = false, Size = new Size(760, 32),
+            ForeColor = ThemeColors.OnSurfaceDim,
+        };
+        host.Controls.Add(intro);
+
+        Label prefixLabel = new()
+        {
+            Text = "Helper name prefix",
+            Location = new Point(0, 42), AutoSize = true,
+            ForeColor = ThemeColors.OnSurface,
+        };
+        HelpHintIcon prefixHelp = new(HelpContent.TopicIds.StatesPrefix);
+        host.Controls.Add(prefixLabel);
+        host.Controls.Add(prefixHelp);
+        prefixHelp.AlignWithLabel(prefixLabel);
+
+        _helperPrefixBox = new TextBox
+        {
+            Location = new Point(prefixHelp.Right + 12, 38),
+            Width = 220,
+            BackColor = ThemeColors.Surface,
+            ForeColor = ThemeColors.OnSurface,
+            BorderStyle = BorderStyle.FixedSingle,
+        };
+        _helperPrefixBox.TextChanged += (_, _) => RefreshAllPreviews();
+        host.Controls.Add(_helperPrefixBox);
+
+        int headerY = 84;
+        Label hdrEnabled = MakeColumnHeader("Enabled", 0, headerY);
+        Label hdrName    = MakeColumnHeader("Name",    72, headerY);
+        Label hdrIcon    = MakeColumnHeader("Icon",   232, headerY);
+        Label hdrSlug    = MakeColumnHeader("Entity ID slug", 392, headerY);
+        Label hdrTest    = MakeColumnHeader("",       680, headerY);
+        HelpHintIcon iconColHelp = new(HelpContent.TopicIds.StatesIcon);
+        host.Controls.Add(hdrEnabled);
+        host.Controls.Add(hdrName);
+        host.Controls.Add(hdrIcon);
+        host.Controls.Add(iconColHelp);
+        iconColHelp.AlignWithLabel(hdrIcon);
+        host.Controls.Add(hdrSlug);
+        host.Controls.Add(hdrTest);
+
+        int y = headerY + 24;
+        foreach (StateFlagDefinition def in StateFlagDefinitions.All)
+        {
+            string capturedFlagId = def.FlagId;
+            CheckBox enabled = new()
+            {
+                Location = new Point(16, y + 4),
+                AutoSize = true,
+                Text = "",
+                ForeColor = ThemeColors.OnSurface,
+            };
+            enabled.CheckedChanged += (_, _) => RefreshTestButtonsEnabled();
+            TextBox nameBox = new()
+            {
+                Location = new Point(72, y),
+                Width = 150,
+                BackColor = ThemeColors.Surface,
+                ForeColor = ThemeColors.OnSurface,
+                BorderStyle = BorderStyle.FixedSingle,
+            };
+            nameBox.TextChanged += (_, _) => RefreshRowPreview(capturedFlagId);
+
+            TextBox iconBox = new()
+            {
+                Location = new Point(232, y),
+                Width = 150,
+                BackColor = ThemeColors.Surface,
+                ForeColor = ThemeColors.OnSurface,
+                BorderStyle = BorderStyle.FixedSingle,
+            };
+
+            Label preview = new()
+            {
+                Location = new Point(392, y + 3), AutoSize = false, Size = new Size(280, 20),
+                ForeColor = ThemeColors.OnSurfaceDim, Text = "",
+            };
+
+            Button testButton = MakeAction("Test");
+            testButton.Width = 64;
+            testButton.Location = new Point(680, y - 1);
+            testButton.Enabled = false;
+            testButton.Click += async (_, _) => await OnTestPublishClickedAsync(capturedFlagId, testButton).ConfigureAwait(true);
+
+            host.Controls.Add(enabled);
+            host.Controls.Add(nameBox);
+            host.Controls.Add(iconBox);
+            host.Controls.Add(preview);
+            host.Controls.Add(testButton);
+
+            _flagRows[capturedFlagId] = new FlagRow
+            {
+                Enabled = enabled,
+                NameSuffix = nameBox,
+                Icon = iconBox,
+                Preview = preview,
+                TestButton = testButton,
+            };
+            y += 30;
+        }
+
+        host.ResumeLayout(performLayout: true);
+    }
+
+    // ===== Theming helpers =====
+
+    private static Button MakeAction(string text)
+    {
+        Button b = new()
+        {
+            Text = text,
+            Width = 120,
+            Height = 28,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = ThemeColors.SurfaceMuted,
+            ForeColor = ThemeColors.OnSurface,
+            UseCompatibleTextRendering = false,
+        };
+        b.FlatAppearance.BorderColor = ThemeColors.Divider;
+        b.FlatAppearance.MouseOverBackColor = ThemeColors.Surface;
+        b.FlatAppearance.MouseDownBackColor = ThemeColors.SurfaceMuted;
+        return b;
+    }
+
+    private static Label MakeSubsectionHeader(string text) => new()
+    {
+        Text = text,
+        AutoSize = true,
+        Font = new Font("Segoe UI", 9.5F, FontStyle.Bold),
+        ForeColor = ThemeColors.OnSurface,
+    };
+
+    private static Label MakeColumnHeader(string text, int x, int y) => new()
+    {
+        Text = text,
+        AutoSize = true,
+        Location = new Point(x, y),
+        Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+        ForeColor = ThemeColors.OnSurface,
+    };
+
+    private static Label MakePerfLabel(int x, int y) => new()
+    {
+        Location = new Point(x, y), AutoSize = false, Size = new Size(340, 20),
+        ForeColor = ThemeColors.OnSurfaceDim,
+    };
+
+    // ===== Save / load =====
+
+    private void LoadValuesFromConfig()
+    {
+        _haUrlBox.Text = _config.HaBaseUrl;
+        _haTokenBox.Text = SecretProtector.Unprotect(_config.HaTokenProtected) ?? "";
+        _discordClientIdBox.Text = _config.DiscordClientId;
+        _discordClientSecretBox.Text = SecretProtector.Unprotect(_config.DiscordClientSecretProtected) ?? "";
+
+        UpdateDiscordStatusLabel();
+
+        _helperPrefixBox.Text = _config.HelperPrefix ?? "";
+
+        foreach (StateFlagDefinition def in StateFlagDefinitions.All)
+        {
+            if (!_flagRows.TryGetValue(def.FlagId, out FlagRow? row)) continue;
+            FlagOverride? ov = _config.FlagOverrides.GetValueOrDefault(def.FlagId);
+            row.Enabled.Checked = _config.EnabledFlags.Contains(def.FlagId);
+            row.NameSuffix.Text = ov?.NameSuffix ?? def.DefaultNameSuffix;
+            row.Icon.Text = ov?.Icon ?? def.DefaultIcon;
+        }
+
+        _autostartCheckbox.Checked = AutostartManager.IsEnabled();
+        _minimizeToTrayCheckbox.Checked = _config.MinimizeToTrayOnClose;
+        _autoUpdateCheckbox.Checked = _config.CheckUpdatesAutomatically;
+    }
+
+    private void UpdateDiscordStatusLabel()
+    {
+        if (string.IsNullOrEmpty(_config.DiscordRefreshTokenProtected))
+        {
+            _discordStatusLabel.Text = "Not authorized. Click Authorize once Client ID and Client Secret are filled in.";
+            _discordStatusLabel.ForeColor = ThemeColors.OnSurfaceDim;
+        }
+        else if (!DiscordScopes.Matches(_config.DiscordAuthorizedScopeKey))
+        {
+            _discordStatusLabel.Text = "Re-authorize required: cached tokens are for an older permission set.";
+            _discordStatusLabel.ForeColor = ThemeColors.StatusWarn;
+        }
+        else if (!string.IsNullOrEmpty(_config.DiscordGrantedScopes))
+        {
+            _discordStatusLabel.Text = $"Authorized. Granted scopes: {_config.DiscordGrantedScopes}";
+            _discordStatusLabel.ForeColor = ThemeColors.StatusOk;
+        }
+        else
+        {
+            _discordStatusLabel.Text = "Authorized.";
+            _discordStatusLabel.ForeColor = ThemeColors.StatusOk;
+        }
+    }
+
+    private void SaveAll()
+    {
+        _config.HaBaseUrl = _haUrlBox.Text.Trim();
+        _config.HaTokenProtected = string.IsNullOrEmpty(_haTokenBox.Text) ? null : SecretProtector.Protect(_haTokenBox.Text);
+
+        _config.DiscordClientId = _discordClientIdBox.Text.Trim();
+        _config.DiscordClientSecretProtected = string.IsNullOrEmpty(_discordClientSecretBox.Text) ? null : SecretProtector.Protect(_discordClientSecretBox.Text);
+
+        _config.HelperPrefix = (_helperPrefixBox.Text ?? "").Trim();
+
+        _config.EnabledFlags.Clear();
+        foreach (StateFlagDefinition def in StateFlagDefinitions.All)
+        {
+            if (!_flagRows.TryGetValue(def.FlagId, out FlagRow? row)) continue;
+            FlagOverride ov = _config.GetOrCreateOverride(def.FlagId);
+            string suffix = (row.NameSuffix.Text ?? "").Trim();
+            string icon = (row.Icon.Text ?? "").Trim();
+            ov.NameSuffix = string.IsNullOrEmpty(suffix) || suffix == def.DefaultNameSuffix ? null : suffix;
+            ov.Icon = string.IsNullOrEmpty(icon) || icon == def.DefaultIcon ? null : icon;
+            if (row.Enabled.Checked) _config.EnabledFlags.Add(def.FlagId);
+        }
+
+        _config.MinimizeToTrayOnClose = _minimizeToTrayCheckbox.Checked;
+        _config.CheckUpdatesAutomatically = _autoUpdateCheckbox.Checked;
+
+        try
+        {
+            AutostartManager.SetEnabled(_autostartCheckbox.Checked);
+            _config.AutostartEnabled = _autostartCheckbox.Checked;
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Could not update autostart setting:\r\n{ex.Message}",
+                AppConstants.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
+        _configStore.Save(_config);
+    }
+
+    // ===== Section status chips =====
+
+    /// <summary>
+    /// Update the HA / Discord section headers with a status chip when something needs
+    /// attention. Driven by the values currently in the controls (so the chip clears the
+    /// moment the user types a token), not the saved config.
+    /// </summary>
+    private void RefreshSectionStatusChips()
+    {
+        if (string.IsNullOrWhiteSpace(_haUrlBox.Text) || string.IsNullOrWhiteSpace(_haTokenBox.Text))
+        {
+            _haSection.SetStatusChip("Setup required", ThemeColors.StatusError);
+        }
+        else
+        {
+            _haSection.SetStatusChip(null, ThemeColors.SurfaceMuted);
+        }
+
+        if (string.IsNullOrWhiteSpace(_discordClientIdBox.Text) || string.IsNullOrWhiteSpace(_discordClientSecretBox.Text))
+        {
+            _discordSection.SetStatusChip("Setup required", ThemeColors.StatusError);
+        }
+        else if (string.IsNullOrEmpty(_config.DiscordRefreshTokenProtected))
+        {
+            _discordSection.SetStatusChip("Authorize required", ThemeColors.StatusWarn);
+        }
+        else if (!DiscordScopes.Matches(_config.DiscordAuthorizedScopeKey))
+        {
+            _discordSection.SetStatusChip("Re-authorize required", ThemeColors.StatusWarn);
+        }
+        else
+        {
+            _discordSection.SetStatusChip(null, ThemeColors.SurfaceMuted);
+        }
+    }
+
+    private void OnBridgeStatusChanged(object? sender, EventArgs e)
+    {
+        if (IsDisposed) return;
+        if (InvokeRequired) BeginInvoke(new Action(() => { RefreshTestButtonsEnabled(); RefreshSectionStatusChips(); }));
+        else { RefreshTestButtonsEnabled(); RefreshSectionStatusChips(); }
+    }
+
+    private void RefreshTestButtonsEnabled()
+    {
+        bool haOk = _bridge.HaStatus.Phase == ConnectionPhase.Connected;
+        foreach (FlagRow row in _flagRows.Values)
+        {
+            row.TestButton.Enabled = haOk && row.Enabled.Checked;
+        }
+    }
+
+    // ===== Slug preview =====
+
+    private void RefreshAllPreviews()
+    {
+        foreach (string flagId in _flagRows.Keys) RefreshRowPreview(flagId);
+    }
+
+    private void RefreshRowPreview(string flagId)
+    {
+        if (!_flagRows.TryGetValue(flagId, out FlagRow? row)) return;
+        StateFlagDefinition? def = StateFlagDefinitions.FindByFlagId(flagId);
+        if (def is null) return;
+
+        string prefix = (_helperPrefixBox.Text ?? "").Trim();
+        string suffix = string.IsNullOrWhiteSpace(row.NameSuffix.Text) ? def.DefaultNameSuffix : row.NameSuffix.Text.Trim();
+        string friendly = prefix.Length == 0 ? suffix : $"{prefix} {suffix}";
+        string slug = FlagResolver.Slugify(friendly);
+        row.Preview.Text = string.IsNullOrEmpty(slug) ? "(invalid)" : $"input_boolean.{slug}";
+    }
+
+    // ===== Test publish per flag =====
+
+    private async Task OnTestPublishClickedAsync(string flagId, Button button)
+    {
+        string priorText = button.Text;
+        button.Enabled = false;
+        button.Text = "…";
+        try
+        {
+            StateFlagDefinition? def = StateFlagDefinitions.FindByFlagId(flagId);
+            if (def is null)
+            {
+                MessageBox.Show(this, $"Unknown flag: {flagId}", AppConstants.DisplayName);
+                return;
+            }
+            bool currentDiscordValue = def.ValueSelector(_bridge.CurrentVoiceState);
+            await _bridge.PublishTestAsync(flagId, desiredOn: !currentDiscordValue, default).ConfigureAwait(true);
+            button.Text = "✓";
+            await Task.Delay(1500).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Test publish failed:\r\n{ex.Message}", AppConstants.DisplayName);
+        }
+        finally
+        {
+            if (!IsDisposed && !button.IsDisposed)
+            {
+                button.Text = priorText;
+                button.Enabled = _bridge.HaStatus.Phase == ConnectionPhase.Connected;
+            }
+        }
+    }
+
+    // ===== HA test connection =====
+
+    private async Task TestHaConnectionAsync()
+    {
+        _haTestButton.Enabled = false;
+        _haStatusLabel.ForeColor = ThemeColors.OnSurfaceDim;
+        _haStatusLabel.Text = "Connecting…";
+
+        try
+        {
+            HaTestResult result = await SetupActions.TestHaConnectionAsync(
+                _haUrlBox.Text.Trim(), _haTokenBox.Text, CancellationToken.None).ConfigureAwait(true);
+            switch (result)
+            {
+                case HaTestResult.MissingInput m:
+                    _haStatusLabel.ForeColor = ThemeColors.StatusWarn;
+                    _haStatusLabel.Text = m.Message;
+                    break;
+                case HaTestResult.Success s:
+                    _haStatusLabel.ForeColor = ThemeColors.StatusOk;
+                    _haStatusLabel.Text = $"Connected. Found {s.InputBooleanCount} existing input_boolean helper(s).";
+                    break;
+                case HaTestResult.Failure f:
+                    _haStatusLabel.ForeColor = ThemeColors.StatusError;
+                    _haStatusLabel.Text = $"Failed: {f.Message}";
+                    break;
+            }
+        }
+        finally
+        {
+            _haTestButton.Enabled = true;
+        }
+    }
+
+    // ===== Discord authorize =====
+
+    private async Task AuthorizeDiscordAsync()
+    {
+        string clientId = _discordClientIdBox.Text.Trim();
+        string clientSecret = _discordClientSecretBox.Text;
+
+        _discordAuthorizeButton.Enabled = false;
+        _discordStatusLabel.ForeColor = ThemeColors.OnSurfaceDim;
+        _discordStatusLabel.Text = "Stopping bridge…";
+
+        await _bridge.StopAsync().ConfigureAwait(true);
+
+        try
+        {
+            _discordStatusLabel.Text = "Connecting to Discord… approve the prompt in Discord when it appears.";
+            DiscordAuthResult result = await SetupActions.AuthorizeDiscordAsync(
+                clientId, clientSecret, CancellationToken.None).ConfigureAwait(true);
+            switch (result)
+            {
+                case DiscordAuthResult.MissingInput m:
+                    _discordStatusLabel.ForeColor = ThemeColors.StatusWarn;
+                    _discordStatusLabel.Text = m.Message;
+                    break;
+                case DiscordAuthResult.Success s:
+                    SetupActions.PersistDiscordTokens(_config, _configStore, clientId, clientSecret, s.Tokens);
+                    _discordStatusLabel.ForeColor = ThemeColors.StatusOk;
+                    _discordStatusLabel.Text = "Authorized. Tokens cached — bridge will reconnect when you save.";
+                    RefreshSectionStatusChips();
+                    break;
+                case DiscordAuthResult.Failure f:
+                    _discordStatusLabel.ForeColor = ThemeColors.StatusError;
+                    _discordStatusLabel.Text = $"Failed: {f.Message}";
+                    break;
+            }
+        }
+        finally
+        {
+            _discordAuthorizeButton.Enabled = true;
+            _bridge.Start();
+        }
+    }
+
+    // ===== Update-related =====
 
     private async Task OnCheckNowClickedAsync()
     {
@@ -442,217 +1035,89 @@ internal sealed class SettingsForm : Form
         return $"Last checked: {when:yyyy-MM-dd HH:mm}";
     }
 
-    private void LoadValuesFromConfig()
-    {
-        _haUrlBox.Text = _config.HaBaseUrl;
-        _haTokenBox.Text = SecretProtector.Unprotect(_config.HaTokenProtected) ?? "";
-        _discordClientIdBox.Text = _config.DiscordClientId;
-        _discordClientSecretBox.Text = SecretProtector.Unprotect(_config.DiscordClientSecretProtected) ?? "";
+    // ===== Performance refresh =====
 
-        // Surface the current Discord authorization state so the user can see at a glance
-        // what scopes Discord actually granted vs. what the app requested.
-        if (string.IsNullOrEmpty(_config.DiscordRefreshTokenProtected))
+    private void RefreshPerformance()
+    {
+        if (IsDisposed) return;
+
+        TimeSpan uptime = AppMetrics.ProcessUptime();
+        long cpuMs = AppMetrics.CpuTimeMs();
+        DateTime now = DateTime.UtcNow;
+        string cpuPct = "—";
+        if (_lastCpuSampleMs >= 0)
         {
-            _discordStatusLabel.Text = "Not authorized. Click Authorize once Client ID and Client Secret are filled in.";
-            _discordStatusLabel.ForeColor = Color.DimGray;
-        }
-        else if (!DiscordScopes.Matches(_config.DiscordAuthorizedScopeKey))
-        {
-            _discordStatusLabel.Text = "Re-authorize required: cached tokens are for older permissions.";
-            _discordStatusLabel.ForeColor = Color.OrangeRed;
-        }
-        else if (!string.IsNullOrEmpty(_config.DiscordGrantedScopes))
-        {
-            string granted = _config.DiscordGrantedScopes!;
-            bool videoOk = granted.Split(' ', StringSplitOptions.RemoveEmptyEntries)
-                .Any(s => string.Equals(s, DiscordScopes.RpcVideoRead, StringComparison.OrdinalIgnoreCase));
-            if (videoOk)
+            double dWall = (now - _lastCpuSampleWall).TotalMilliseconds;
+            if (dWall > 0)
             {
-                _discordStatusLabel.Text = $"Authorized. Granted scopes: {granted}";
-                _discordStatusLabel.ForeColor = Color.SeaGreen;
-            }
-            else
-            {
-                _discordStatusLabel.Text = $"Authorized but Discord did NOT grant rpc.video.read — camera state will not work. Granted: {granted}";
-                _discordStatusLabel.ForeColor = Color.Firebrick;
+                double dCpu = cpuMs - _lastCpuSampleMs;
+                double pct = dCpu / (dWall * Math.Max(1, Environment.ProcessorCount)) * 100.0;
+                cpuPct = pct.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture) + "%";
             }
         }
-        else
-        {
-            _discordStatusLabel.Text = "Authorized.";
-            _discordStatusLabel.ForeColor = Color.SeaGreen;
-        }
+        _lastCpuSampleMs = cpuMs;
+        _lastCpuSampleWall = now;
 
-        _helperPrefixBox.Text = _config.HelperPrefix ?? "";
+        long wsBytes = AppMetrics.WorkingSetBytes();
+        long privBytes = AppMetrics.PrivateBytes();
+        long allocBytes = AppMetrics.GcAllocatedBytes();
+        (int g0, int g1, int g2) = AppMetrics.GcCollections();
 
-        foreach (StateFlagDefinition def in StateFlagDefinitions.All)
-        {
-            if (!_flagRows.TryGetValue(def.FlagId, out FlagRow? row)) continue;
-            FlagOverride? ov = _config.FlagOverrides.GetValueOrDefault(def.FlagId);
-            row.Enabled.Checked = _config.EnabledFlags.Contains(def.FlagId);
-            row.NameSuffix.Text = ov?.NameSuffix ?? def.DefaultNameSuffix;
-            row.Icon.Text = ov?.Icon ?? def.DefaultIcon;
-        }
+        _perfUptime.Text = $"Uptime:          {PerformanceReport.FormatUptime(uptime)}";
+        _perfCpu.Text = $"CPU time:        {cpuMs:N0} ms  ({cpuPct})";
+        _perfMemory.Text = $"Memory:          ws {PerformanceReport.FormatBytes(wsBytes)} / priv {PerformanceReport.FormatBytes(privBytes)}";
+        _perfGc.Text = $"GC:              {PerformanceReport.FormatBytes(allocBytes)} alloc · Gen 0/1/2 {g0}/{g1}/{g2}";
+        _perfThreadsHandles.Text = $"Threads/handles: {AppMetrics.ThreadCount()} / {AppMetrics.HandleCount()}";
 
-        _autostartCheckbox.Checked = AutostartManager.IsEnabled();
-        _minimizeToTrayCheckbox.Checked = _config.MinimizeToTrayOnClose;
-        _autoUpdateCheckbox.Checked = _config.CheckUpdatesAutomatically;
+        _perfDiscordEvents.Text = $"Discord events:  {AppMetrics.DiscordEventsReceived:N0}";
+        _perfHaFrames.Text = $"HA frames:       sent {AppMetrics.HaFramesSent:N0} / recv {AppMetrics.HaFramesReceived:N0}";
+        _perfCamera.Text = $"Camera polls:    {AppMetrics.CameraRegistryPolls:N0}";
+        _perfReconnects.Text = $"Reconnects:      Discord {AppMetrics.DiscordReconnects} · HA {AppMetrics.HaReconnects}";
+        _perfPublishes.Text = $"Helper publish:  {AppMetrics.HelperPublishes:N0}  (test {AppMetrics.PublishTestInvocations})";
+
+        LatencySnapshot snap = _bridge.PublishLatency.Snapshot();
+        _perfLatency.Text = snap.Count == 0
+            ? "Publish latency: (no samples yet)"
+            : $"Publish latency: p50 {snap.P50Ms.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)} ms · p95 {snap.P95Ms.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)} ms · p99 {snap.P99Ms.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)} ms · n={snap.Count}";
     }
 
-    private void RefreshAllPreviews()
+    // ===== Diagnostics =====
+
+    private void CreateAndShowDiagnostics()
     {
-        foreach (string flagId in _flagRows.Keys)
-        {
-            RefreshRowPreview(flagId);
-        }
-    }
-
-    private void RefreshRowPreview(string flagId)
-    {
-        if (!_flagRows.TryGetValue(flagId, out FlagRow? row)) return;
-        StateFlagDefinition? def = StateFlagDefinitions.FindByFlagId(flagId);
-        if (def is null) return;
-
-        string prefix = (_helperPrefixBox.Text ?? "").Trim();
-        string suffix = string.IsNullOrWhiteSpace(row.NameSuffix.Text) ? def.DefaultNameSuffix : row.NameSuffix.Text.Trim();
-        string friendly = prefix.Length == 0 ? suffix : $"{prefix} {suffix}";
-        string slug = FlagResolver.Slugify(friendly);
-        row.Preview.Text = string.IsNullOrEmpty(slug) ? "(invalid)" : $"input_boolean.{slug}";
-    }
-
-    private void SaveAll()
-    {
-        _config.HaBaseUrl = _haUrlBox.Text.Trim();
-        _config.HaTokenProtected = string.IsNullOrEmpty(_haTokenBox.Text) ? null : SecretProtector.Protect(_haTokenBox.Text);
-
-        _config.DiscordClientId = _discordClientIdBox.Text.Trim();
-        _config.DiscordClientSecretProtected = string.IsNullOrEmpty(_discordClientSecretBox.Text) ? null : SecretProtector.Protect(_discordClientSecretBox.Text);
-
-        _config.HelperPrefix = (_helperPrefixBox.Text ?? "").Trim();
-
-        _config.EnabledFlags.Clear();
-        foreach (StateFlagDefinition def in StateFlagDefinitions.All)
-        {
-            if (!_flagRows.TryGetValue(def.FlagId, out FlagRow? row)) continue;
-
-            FlagOverride ov = _config.GetOrCreateOverride(def.FlagId);
-            string suffix = (row.NameSuffix.Text ?? "").Trim();
-            string icon = (row.Icon.Text ?? "").Trim();
-            ov.NameSuffix = string.IsNullOrEmpty(suffix) || suffix == def.DefaultNameSuffix ? null : suffix;
-            ov.Icon = string.IsNullOrEmpty(icon) || icon == def.DefaultIcon ? null : icon;
-
-            if (row.Enabled.Checked) _config.EnabledFlags.Add(def.FlagId);
-        }
-
-        _config.MinimizeToTrayOnClose = _minimizeToTrayCheckbox.Checked;
-        _config.CheckUpdatesAutomatically = _autoUpdateCheckbox.Checked;
-
         try
         {
-            AutostartManager.SetEnabled(_autostartCheckbox.Checked);
-            _config.AutostartEnabled = _autostartCheckbox.Checked;
+            System.IO.FileInfo file = DiagnosticsBundle.Create(_config, _bridge);
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "explorer.exe",
+                    Arguments = $"/select,\"{file.FullName}\"",
+                    UseShellExecute = true,
+                });
+            }
+            catch
+            {
+                MessageBox.Show(this, $"Diagnostics bundle written to:\r\n{file.FullName}", AppConstants.DisplayName);
+            }
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Could not update autostart setting:\r\n{ex.Message}", AppConstants.DisplayName,
-                MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
-
-        _configStore.Save(_config);
-    }
-
-    private async Task TestHaConnectionAsync()
-    {
-        string url = _haUrlBox.Text.Trim();
-        string token = _haTokenBox.Text;
-        if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(token))
-        {
-            _haStatusLabel.ForeColor = Color.OrangeRed;
-            _haStatusLabel.Text = "Enter a URL and token first.";
-            return;
-        }
-
-        _haTestButton.Enabled = false;
-        _haStatusLabel.ForeColor = Color.DimGray;
-        _haStatusLabel.Text = "Connecting…";
-
-        try
-        {
-            using CancellationTokenSource cts = new(TimeSpan.FromSeconds(10));
-            await using HaWebSocketClient client = new(url, token);
-            await client.ConnectAndAuthenticateAsync(cts.Token).ConfigureAwait(true);
-
-            System.Text.Json.JsonElement listResult = await client.SendCommandAsync(
-                new { type = "input_boolean/list" }, cts.Token).ConfigureAwait(true);
-            int count = listResult.ValueKind == System.Text.Json.JsonValueKind.Array
-                ? listResult.GetArrayLength()
-                : 0;
-
-            _haStatusLabel.ForeColor = Color.SeaGreen;
-            _haStatusLabel.Text = $"Connected. Found {count} existing input_boolean helper(s).";
-        }
-        catch (Exception ex)
-        {
-            _haStatusLabel.ForeColor = Color.Firebrick;
-            _haStatusLabel.Text = $"Failed: {ex.Message}";
-        }
-        finally
-        {
-            _haTestButton.Enabled = true;
+            MessageBox.Show(this, $"Could not create diagnostics bundle:\r\n{ex.Message}",
+                AppConstants.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 
-    private async Task AuthorizeDiscordAsync()
+    private static void OpenUrlInBrowser(string url)
     {
-        string clientId = _discordClientIdBox.Text.Trim();
-        string clientSecret = _discordClientSecretBox.Text;
-        if (string.IsNullOrEmpty(clientId) || string.IsNullOrEmpty(clientSecret))
-        {
-            _discordStatusLabel.ForeColor = Color.OrangeRed;
-            _discordStatusLabel.Text = "Enter both Client ID and Client Secret first.";
-            return;
-        }
-
-        _discordAuthorizeButton.Enabled = false;
-        _discordStatusLabel.ForeColor = Color.DimGray;
-        _discordStatusLabel.Text = "Stopping bridge…";
-
-        await _bridge.StopAsync().ConfigureAwait(true);
-
         try
         {
-            _discordStatusLabel.Text = "Connecting to Discord… approve the prompt in Discord when it appears.";
-            using CancellationTokenSource cts = new(TimeSpan.FromMinutes(2));
-
-            await using DiscordRpcSession session = new();
-            string code = await session.AuthorizeAsync(clientId, cts.Token).ConfigureAwait(true);
-
-            _discordStatusLabel.Text = "Exchanging code for token…";
-            DiscordOAuth oauth = new();
-            DiscordTokens tokens = await oauth.ExchangeCodeAsync(
-                clientId, clientSecret, code, AppConstants.DiscordOAuthRedirectUri, cts.Token).ConfigureAwait(true);
-
-            _config.DiscordClientId = clientId;
-            _config.DiscordClientSecretProtected = SecretProtector.Protect(clientSecret);
-            _config.DiscordAccessTokenProtected = SecretProtector.Protect(tokens.AccessToken);
-            _config.DiscordAccessTokenExpiresAtUnix = tokens.ExpiresAt.ToUnixTimeSeconds();
-            _config.DiscordRefreshTokenProtected = SecretProtector.Protect(tokens.RefreshToken);
-            _config.DiscordAuthorizedScopeKey = DiscordScopes.CurrentKey();
-            _config.DiscordGrantedScopes = tokens.GrantedScopes;
-            _configStore.Save(_config);
-
-            _discordStatusLabel.ForeColor = Color.SeaGreen;
-            _discordStatusLabel.Text = "Authorized. Tokens cached — bridge will reconnect when you save.";
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo { FileName = url, UseShellExecute = true });
         }
-        catch (Exception ex)
+        catch
         {
-            _discordStatusLabel.ForeColor = Color.Firebrick;
-            _discordStatusLabel.Text = $"Failed: {ex.Message}";
-        }
-        finally
-        {
-            _discordAuthorizeButton.Enabled = true;
-            _bridge.Start();
+            // user can copy from the link text if launch fails
         }
     }
 }

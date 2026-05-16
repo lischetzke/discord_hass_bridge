@@ -2,6 +2,7 @@ using System;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using DiscordHass.App;
 
 namespace DiscordHass.Discord;
 
@@ -113,6 +114,7 @@ internal sealed class DiscordRpcSession : IAsyncDisposable
 
     private void OnIpcEvent(object? sender, DiscordIpcEvent ev)
     {
+        AppMetrics.IncrementDiscordEvent();
         switch (ev.EventName)
         {
             case "VOICE_CHANNEL_SELECT":

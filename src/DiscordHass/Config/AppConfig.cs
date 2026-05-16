@@ -38,6 +38,14 @@ internal sealed class AppConfig
 
     public long LastUpdateCheckUnix { get; set; } = 0;
 
+    /// <summary>
+    /// True once the user has finished the v0.2.0 onboarding wizard (or once the upgrade-detection
+    /// backfill in <c>Program.Main</c> has decided that an existing v0.1.x install is already fully
+    /// configured). The wizard is suppressed when this is true; it can still be launched explicitly
+    /// from Settings → General → "Run setup again…".
+    /// </summary>
+    public bool HasCompletedOnboarding { get; set; } = false;
+
     public static readonly string[] DefaultEnabledFlags =
     {
         StateFlagIds.InCall,

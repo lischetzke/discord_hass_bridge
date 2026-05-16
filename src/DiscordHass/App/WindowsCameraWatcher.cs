@@ -57,6 +57,7 @@ internal sealed class WindowsCameraWatcher : IAsyncDisposable
         {
             try
             {
+                AppMetrics.IncrementCameraPoll();
                 Sample sample = Probe();
                 if (sample.InUse != _lastReported)
                 {

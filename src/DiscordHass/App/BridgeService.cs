@@ -45,6 +45,10 @@ internal sealed class BridgeService : IAsyncDisposable
 
     private VoiceState? _lastPublishedState;
     private readonly SemaphoreSlim _publishLock = new(1, 1);
+    private readonly LatencyHistogram _publishLatency = new(capacity: 256);
+
+    /// <summary>Read-only handle for the Settings → Performance section.</summary>
+    public LatencyHistogram PublishLatency => _publishLatency;
 
     public ConnectionStatus DiscordStatus { get; } = new();
     public ConnectionStatus HaStatus { get; } = new();
@@ -183,6 +187,7 @@ internal sealed class BridgeService : IAsyncDisposable
             try { await PublishAllOffAsync(ct).ConfigureAwait(false); } catch { /* best effort */ }
 
             SetStatus(DiscordStatus, ConnectionPhase.Reconnecting, DiscordStatus.LastError);
+            AppMetrics.IncrementDiscordReconnect();
             await SafeDelayAsync(backoff, ct).ConfigureAwait(false);
             backoff = TimeSpan.FromSeconds(Math.Min(30, backoff.TotalSeconds * 2));
         }
@@ -252,6 +257,7 @@ internal sealed class BridgeService : IAsyncDisposable
 
             if (ct.IsCancellationRequested) break;
             SetStatus(HaStatus, ConnectionPhase.Reconnecting, HaStatus.LastError);
+            AppMetrics.IncrementHaReconnect();
             await SafeDelayAsync(backoff, ct).ConfigureAwait(false);
             backoff = TimeSpan.FromSeconds(Math.Min(30, backoff.TotalSeconds * 2));
         }
@@ -317,7 +323,10 @@ internal sealed class BridgeService : IAsyncDisposable
                         ov.LastEntityIdSlug = actualSlug;
                         configDirty = true;
                     }
+                    System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
                     await helpers.SetStateAsync(actualSlug, u.DesiredOn, ct).ConfigureAwait(false);
+                    sw.Stop();
+                    _publishLatency.Record(sw.Elapsed);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
@@ -331,6 +340,56 @@ internal sealed class BridgeService : IAsyncDisposable
                 try { _configStore.Save(_config); } catch { /* tolerate */ }
             }
             _lastPublishedState = CurrentVoiceState;
+        }
+        finally
+        {
+            try { _publishLock.Release(); } catch { /* disposed */ }
+        }
+    }
+
+    /// <summary>
+    /// Forces a single state publish to HA for one flag, ignoring Discord's view of reality.
+    /// Used by the "Test publish" button on Settings → States. Throws if HA isn't connected
+    /// or the flag id is unknown — callers should grey the button when <see cref="HaStatus"/>
+    /// isn't Connected.
+    /// </summary>
+    public async Task PublishTestAsync(string flagId, bool desiredOn, CancellationToken ct)
+    {
+        HaHelperManager? helpers = _haHelpers;
+        if (helpers is null)
+        {
+            throw new InvalidOperationException("Home Assistant is not connected.");
+        }
+        StateFlagDefinition def = StateFlagDefinitions.FindByFlagId(flagId)
+            ?? throw new ArgumentException($"Unknown flag id: {flagId}", nameof(flagId));
+
+        EffectiveStateFlag eff = FlagResolver.Resolve(def, _config);
+        FlagOverride ov = _config.GetOrCreateOverride(flagId);
+
+        await _publishLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            // Make sure the helper exists / is renamed before we publish to it. EnsureAndSync
+            // will create-or-rename and return the slug that's actually in HA right now.
+            string actualSlug = await helpers.EnsureAndSyncAsync(
+                eff.EntityIdSlug, eff.FriendlyName, eff.Icon, ov.LastEntityIdSlug, ct).ConfigureAwait(false);
+            if (!string.Equals(actualSlug, ov.LastEntityIdSlug, StringComparison.Ordinal))
+            {
+                ov.LastEntityIdSlug = actualSlug;
+                try { _configStore.Save(_config); } catch { /* tolerate */ }
+            }
+            System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+            await helpers.SetStateAsync(actualSlug, desiredOn, ct).ConfigureAwait(false);
+            sw.Stop();
+            _publishLatency.Record(sw.Elapsed);
+
+            // Keep diff bookkeeping consistent so the next real Discord event publishes the
+            // correct value rather than thinking nothing changed.
+            if (_lastPublishedState is null)
+            {
+                _lastPublishedState = CurrentVoiceState;
+            }
+            AppMetrics.IncrementTestPublish();
         }
         finally
         {
@@ -369,8 +428,8 @@ internal sealed class BridgeService : IAsyncDisposable
     {
         // Cached tokens were issued for a specific scope set. Discord's refresh flow only
         // re-issues the original scopes, so a stale scope key here means the cached tokens
-        // cannot grant our current required permissions (e.g. rpc.video.read for camera state).
-        // Clear them so the user is forced through a fresh AUTHORIZE.
+        // were granted for a different permission set than this version requires. Clear them
+        // so the user is forced through a fresh AUTHORIZE.
         if (!string.IsNullOrEmpty(_config.DiscordRefreshTokenProtected)
             && !DiscordScopes.Matches(_config.DiscordAuthorizedScopeKey))
         {
@@ -380,7 +439,7 @@ internal sealed class BridgeService : IAsyncDisposable
             _config.DiscordAuthorizedScopeKey = null;
             try { _configStore.Save(_config); } catch { /* tolerate */ }
             throw new DiscordIpcCommandException(
-                "Discord permissions changed in this version (camera state now requires re-authorization). " +
+                "Discord permissions changed in this version — re-authorization required. " +
                 "Open Settings → Discord → Authorize.");
         }
 

@@ -121,7 +121,14 @@ internal sealed class UpdateService : IAsyncDisposable
         await _downloadLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            string stagingPath = Path.Combine(AppPaths.UpdateStagingDir, avail.ExeAssetName);
+            // Defense-in-depth: UpdateChecker.SelectExeAsset already rejects unsafe names,
+            // but re-validate so a future bug in the checker can't redirect the staging path.
+            if (!UpdateChecker.IsSafeAssetName(avail.ExeAssetName))
+            {
+                throw new UpdateDownloadException($"Refusing unsafe asset name: {avail.ExeAssetName}");
+            }
+            string safeName = Path.GetFileName(avail.ExeAssetName);
+            string stagingPath = Path.Combine(AppPaths.UpdateStagingDir, safeName);
             Directory.CreateDirectory(AppPaths.UpdateStagingDir);
 
             SetState(UpdateState.Downloading, null);

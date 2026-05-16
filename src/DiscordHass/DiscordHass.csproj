@@ -12,14 +12,18 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ApplicationIcon>Ui/Icons/tray.ico</ApplicationIcon>
-    <Version>0.1.4</Version>
-    <FileVersion>0.1.4.0</FileVersion>
-    <AssemblyVersion>0.1.4.0</AssemblyVersion>
-    <InformationalVersion>0.1.4</InformationalVersion>
+    <Version>0.2.0</Version>
+    <FileVersion>0.2.0.0</FileVersion>
+    <AssemblyVersion>0.2.0.0</AssemblyVersion>
+    <InformationalVersion>0.2.0</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="Ui/Icons/tray.ico" LogicalName="DiscordHass.tray.ico" />
+    <EmbeddedResource Include="Ui/Icons/tray.ico"       LogicalName="DiscordHass.tray.ico" />
+    <EmbeddedResource Include="Ui/Icons/tray-idle.ico"  LogicalName="DiscordHass.tray-idle.ico" />
+    <EmbeddedResource Include="Ui/Icons/tray-ok.ico"    LogicalName="DiscordHass.tray-ok.ico" />
+    <EmbeddedResource Include="Ui/Icons/tray-warn.ico"  LogicalName="DiscordHass.tray-warn.ico" />
+    <EmbeddedResource Include="Ui/Icons/tray-fault.ico" LogicalName="DiscordHass.tray-fault.ico" />
   </ItemGroup>
 
   <PropertyGroup Condition="'$(Configuration)'=='Release'">

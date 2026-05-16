@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -78,7 +79,11 @@ internal sealed class UpdateChecker
 
         GitHubReleaseAsset? shaAsset = release.Assets.FirstOrDefault(a =>
             string.Equals(a.Name, exeAsset.Name + ".sha256", StringComparison.OrdinalIgnoreCase));
-        if (shaAsset?.BrowserDownloadUrl is null) return null;
+        if (shaAsset?.BrowserDownloadUrl is null || string.IsNullOrEmpty(shaAsset.Name)) return null;
+
+        // Defense-in-depth: the sha sidecar name is derived from the exe name, but if the source
+        // ever changes, refuse anything that would be unsafe to use as a file path.
+        if (!IsSafeAssetName(shaAsset.Name)) return null;
 
         return new UpdateAvailable(
             version,
@@ -98,6 +103,10 @@ internal sealed class UpdateChecker
         {
             if (string.IsNullOrEmpty(a.Name)) continue;
             if (!a.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) continue;
+            // Reject any asset name that would be unsafe to use as a file path. A compromised
+            // release could otherwise name an asset "..\..\Windows\System32\evil.exe" and the
+            // downstream Path.Combine in UpdateService would resolve outside the staging dir.
+            if (!IsSafeAssetName(a.Name)) continue;
             if (a.Name.IndexOf(runtime, StringComparison.OrdinalIgnoreCase) >= 0)
             {
                 return a;
@@ -105,5 +114,21 @@ internal sealed class UpdateChecker
             match ??= a;
         }
         return match;
+    }
+
+    /// <summary>
+    /// True when <paramref name="name"/> is a plain filename with no directory components or
+    /// other characters that would be unsafe to use in a file path. Required because release
+    /// asset names come from a remote source (GitHub) and could be attacker-influenced if the
+    /// release is ever compromised.
+    /// </summary>
+    internal static bool IsSafeAssetName(string? name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        if (name != Path.GetFileName(name)) return false;
+        if (name.Contains('/') || name.Contains('\\')) return false;
+        if (name.Contains("..", StringComparison.Ordinal)) return false;
+        if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return false;
+        return true;
     }
 }

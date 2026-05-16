@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Windows.Forms;
@@ -18,11 +19,15 @@ internal sealed class TrayIconHost : IDisposable
     private readonly ContextMenuStrip _menu;
     private readonly ToolStripMenuItem _autostartItem;
     private readonly ToolStripMenuItem _updateItem;
+    private readonly Dictionary<TrayIconVariant, Icon> _iconCache = new();
     private SettingsForm? _settingsForm;
-    private StatusForm? _statusForm;
+    private OverviewForm? _overviewForm;
+    private OnboardingWizardForm? _wizardForm;
     private UpdateProgressForm? _updateForm;
 
     public event EventHandler? QuitRequested;
+
+    private enum TrayIconVariant { Idle, Ok, Warn, Fault }
 
     public TrayIconHost(AppConfig config, ConfigStore configStore, BridgeService bridge, UpdateService updates)
     {
@@ -34,22 +39,25 @@ internal sealed class TrayIconHost : IDisposable
         _autostartItem = new ToolStripMenuItem("Start with Windows") { CheckOnClick = true, Checked = AutostartManager.IsEnabled() };
         _autostartItem.Click += (_, _) => ToggleAutostart();
 
-        _updateItem = new ToolStripMenuItem("Check for updates…")
-        {
-            Visible = true,
-        };
+        _updateItem = new ToolStripMenuItem("Check for updates…");
         _updateItem.Click += async (_, _) => await OnUpdateMenuClickedAsync().ConfigureAwait(true);
 
         _menu = BuildMenu();
 
         _notifyIcon = new NotifyIcon
         {
-            Icon = LoadAppIcon(),
+            Icon = LoadIcon(TrayIconVariant.Idle),
             Visible = false,
             Text = AppConstants.DisplayName,
             ContextMenuStrip = _menu,
         };
-        _notifyIcon.DoubleClick += (_, _) => OpenStatus();
+        // Single left-click → Overview. Right-click is intercepted by ContextMenuStrip.
+        _notifyIcon.MouseClick += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Left) OpenOverview();
+        };
+        // Keep double-click as a redundant fallback for users used to the old behaviour.
+        _notifyIcon.DoubleClick += (_, _) => OpenOverview();
 
         _bridge.StatusChanged += OnBridgeStatusChanged;
         _updates.StateChanged += OnUpdateStateChanged;
@@ -58,21 +66,25 @@ internal sealed class TrayIconHost : IDisposable
     public void Show()
     {
         _notifyIcon.Visible = true;
-        UpdateTrayText();
-        if (string.IsNullOrEmpty(_config.HaBaseUrl) || string.IsNullOrEmpty(_config.DiscordClientId))
+        UpdateTrayVisual();
+
+        // First-run wizard takes priority over showing Settings. The Program.LooksConfigured
+        // backfill ensures upgrading users from v0.1.x don't get the wizard.
+        if (!_config.HasCompletedOnboarding)
         {
-            OpenSettings();
+            OpenWizard();
         }
     }
 
     private ContextMenuStrip BuildMenu()
     {
         ContextMenuStrip menu = new();
+        menu.Items.Add("Overview…", null, (_, _) => OpenOverview());
         menu.Items.Add("Settings…", null, (_, _) => OpenSettings());
-        menu.Items.Add("Status…", null, (_, _) => OpenStatus());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Open Home Assistant", null, (_, _) => OpenHaInBrowser());
         menu.Items.Add("Reconnect", null, async (_, _) => await _bridge.RestartAsync().ConfigureAwait(false));
+        menu.Items.Add("Help…", null, (_, _) => HelpDialog.ShowTopic(null, HelpContent.TopicIds.OverviewIntro));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_updateItem);
         menu.Items.Add(_autostartItem);
@@ -81,8 +93,36 @@ internal sealed class TrayIconHost : IDisposable
         return menu;
     }
 
+    private void OpenOverview()
+    {
+        if (_wizardForm is not null && !_wizardForm.IsDisposed)
+        {
+            _wizardForm.Activate();
+            return;
+        }
+
+        if (_overviewForm is null || _overviewForm.IsDisposed)
+        {
+            _overviewForm = new OverviewForm(_config, _bridge);
+            _overviewForm.SettingsRequested        += (_, _) => OpenSettings();
+            _overviewForm.ReconnectRequested       += async (_, _) => await _bridge.RestartAsync().ConfigureAwait(true);
+            _overviewForm.OpenHaRequested          += (_, _) => OpenHaInBrowser();
+            _overviewForm.OpenHelpRequested        += (_, _) => HelpDialog.ShowTopic(_overviewForm, HelpContent.TopicIds.OverviewIntro);
+            _overviewForm.CopyDiagnosticsRequested += (_, _) => CreateAndShowDiagnostics(_overviewForm);
+            _overviewForm.FormClosed += (_, _) => _overviewForm = null;
+        }
+        _overviewForm.Show();
+        _overviewForm.Activate();
+    }
+
     private void OpenSettings()
     {
+        if (_wizardForm is not null && !_wizardForm.IsDisposed)
+        {
+            _wizardForm.Activate();
+            return;
+        }
+
         if (_settingsForm is null || _settingsForm.IsDisposed)
         {
             _settingsForm = new SettingsForm(_config, _configStore, _bridge, _updates);
@@ -96,15 +136,26 @@ internal sealed class TrayIconHost : IDisposable
         _settingsForm.Activate();
     }
 
-    private void OpenStatus()
+    private void OpenWizard()
     {
-        if (_statusForm is null || _statusForm.IsDisposed)
+        if (_wizardForm is not null && !_wizardForm.IsDisposed)
         {
-            _statusForm = new StatusForm(_config, _bridge);
-            _statusForm.FormClosed += (_, _) => _statusForm = null;
+            _wizardForm.Activate();
+            return;
         }
-        _statusForm.Show();
-        _statusForm.Activate();
+        _wizardForm = new OnboardingWizardForm(_config, _configStore, _bridge);
+        _wizardForm.FormClosed += (_, _) =>
+        {
+            _wizardForm = null;
+            _autostartItem.Checked = AutostartManager.IsEnabled();
+            // If the user finished the wizard, open the Overview so they can see the live state.
+            if (_config.HasCompletedOnboarding)
+            {
+                OpenOverview();
+            }
+        };
+        _wizardForm.Show();
+        _wizardForm.Activate();
     }
 
     private void OpenHaInBrowser()
@@ -117,6 +168,32 @@ internal sealed class TrayIconHost : IDisposable
         catch (Exception ex)
         {
             MessageBox.Show($"Could not open browser: {ex.Message}", AppConstants.DisplayName);
+        }
+    }
+
+    private void CreateAndShowDiagnostics(IWin32Window? owner)
+    {
+        try
+        {
+            System.IO.FileInfo file = DiagnosticsBundle.Create(_config, _bridge);
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "explorer.exe",
+                    Arguments = $"/select,\"{file.FullName}\"",
+                    UseShellExecute = true,
+                });
+            }
+            catch
+            {
+                MessageBox.Show(owner, $"Diagnostics bundle written to:\r\n{file.FullName}", AppConstants.DisplayName);
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(owner, $"Could not create diagnostics bundle:\r\n{ex.Message}", AppConstants.DisplayName,
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 
@@ -184,11 +261,11 @@ internal sealed class TrayIconHost : IDisposable
         {
             if (_menu.InvokeRequired)
             {
-                _menu.BeginInvoke(new Action(UpdateTrayText));
+                _menu.BeginInvoke(new Action(UpdateTrayVisual));
             }
             else
             {
-                UpdateTrayText();
+                UpdateTrayVisual();
             }
         }
         catch (InvalidOperationException) { /* window not yet created */ }
@@ -256,13 +333,53 @@ internal sealed class TrayIconHost : IDisposable
         _notifyIcon.ShowBalloonTip(5000);
     }
 
-    private void UpdateTrayText()
+    private void UpdateTrayVisual()
+    {
+        TrayIconVariant variant = PickVariant(_bridge.DiscordStatus.Phase, _bridge.HaStatus.Phase);
+        _notifyIcon.Icon = LoadIcon(variant);
+        _notifyIcon.Text = BuildTooltip();
+    }
+
+    private string BuildTooltip()
     {
         string discord = ShortPhase(_bridge.DiscordStatus.Phase);
         string ha = ShortPhase(_bridge.HaStatus.Phase);
         string text = $"{AppConstants.DisplayName}\nDiscord: {discord}\nHA: {ha}";
-        if (text.Length > 127) text = text[..127];
-        _notifyIcon.Text = text;
+        // NotifyIcon tooltip is limited to 127 chars.
+        return text.Length > 127 ? text[..127] : text;
+    }
+
+    private static TrayIconVariant PickVariant(ConnectionPhase discord, ConnectionPhase ha)
+    {
+        // Worst-case selection: any fault wins, then any in-progress, then OK if both connected,
+        // else idle.
+        if (discord == ConnectionPhase.Faulted || ha == ConnectionPhase.Faulted)
+            return TrayIconVariant.Fault;
+        if (discord is ConnectionPhase.Connecting or ConnectionPhase.Reconnecting
+         || ha      is ConnectionPhase.Connecting or ConnectionPhase.Reconnecting)
+            return TrayIconVariant.Warn;
+        if (discord == ConnectionPhase.Connected && ha == ConnectionPhase.Connected)
+            return TrayIconVariant.Ok;
+        return TrayIconVariant.Idle;
+    }
+
+    private Icon LoadIcon(TrayIconVariant variant)
+    {
+        if (_iconCache.TryGetValue(variant, out Icon? cached)) return cached;
+
+        string resourceName = variant switch
+        {
+            TrayIconVariant.Ok    => "DiscordHass.tray-ok.ico",
+            TrayIconVariant.Warn  => "DiscordHass.tray-warn.ico",
+            TrayIconVariant.Fault => "DiscordHass.tray-fault.ico",
+            _                     => "DiscordHass.tray-idle.ico",
+        };
+        System.Reflection.Assembly assembly = typeof(TrayIconHost).Assembly;
+        using System.IO.Stream? stream = assembly.GetManifestResourceStream(resourceName)
+                                       ?? assembly.GetManifestResourceStream("DiscordHass.tray.ico");
+        Icon icon = stream is null ? SystemIcons.Application : new Icon(stream);
+        _iconCache[variant] = icon;
+        return icon;
     }
 
     private static string ShortPhase(ConnectionPhase phase) => phase switch
@@ -275,13 +392,6 @@ internal sealed class TrayIconHost : IDisposable
         _ => phase.ToString().ToLowerInvariant(),
     };
 
-    private static Icon LoadAppIcon()
-    {
-        System.Reflection.Assembly assembly = typeof(TrayIconHost).Assembly;
-        using System.IO.Stream? stream = assembly.GetManifestResourceStream("DiscordHass.tray.ico");
-        return stream is null ? SystemIcons.Application : new Icon(stream);
-    }
-
     public void Dispose()
     {
         _bridge.StatusChanged -= OnBridgeStatusChanged;
@@ -290,7 +400,12 @@ internal sealed class TrayIconHost : IDisposable
         _notifyIcon.Dispose();
         _menu.Dispose();
         _settingsForm?.Dispose();
-        _statusForm?.Dispose();
+        _overviewForm?.Dispose();
+        _wizardForm?.Dispose();
         _updateForm?.Dispose();
+        foreach (Icon icon in _iconCache.Values)
+        {
+            icon.Dispose();
+        }
     }
 }

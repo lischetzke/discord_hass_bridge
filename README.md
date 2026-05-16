@@ -71,12 +71,27 @@ Settings UI — see [Customizing helper names and icons](#customizing-helper-nam
 
 Grab the latest `DiscordHass.exe` from the [releases](#) page (or build it
 yourself, see [Build from source](#build-from-source)). It's a single ~50 MB
-file. Drop it anywhere — `%LOCALAPPDATA%\Programs\DiscordHass\DiscordHass.exe`
-is a tidy spot — and run it.
+file.
 
-The first launch opens the **Settings** window. Walk through the three
-configuration tabs below; once you click *Save & Close*, the app drops into
-the system tray and the settings window goes away.
+### Recommended install location
+
+Install DiscordHass to `%LOCALAPPDATA%\Programs\DiscordHass\` — a per-user
+folder that isn't world-writable. Running the exe directly from `Downloads`,
+shared network drives, or any folder another user can write to is
+unsupported: a hostile process with write access to the exe's folder could
+DLL-plant against the .NET host.
+
+### First launch
+
+On first launch DiscordHass opens a 5-step setup wizard that walks you through
+the Home Assistant token, the one-time Discord application registration, and
+preferences like autostart. You can re-open it any time from **Settings →
+General → Run setup wizard again…**.
+
+Once setup is complete the app drops into the system tray. **Click the tray
+icon** to open the Overview window — Discord and HA connection state, live
+values of every state flag, and direct buttons to Settings, Reconnect, Open
+HA, Copy diagnostics, and Help. Right-click for the full context menu.
 
 ---
 
@@ -308,6 +323,36 @@ If you'd rather update by hand, turn off auto-check and download the new
 exe from the [releases page](https://github.com/lischetzke/discord_hass_bridge/releases)
 when you feel like it. Replacing the file while DiscordHass is running is
 fine — close it from the tray first.
+
+### How updates are verified
+
+DiscordHass takes a few simple measures so a compromised network or release
+page can't quietly install something different than what we shipped:
+
+* **HTTPS-only fetch.** The `releases/latest` API call and the asset
+  download both go over HTTPS via the .NET `HttpClient` with default TLS
+  validation. There's no HTTP fallback.
+* **SHA-256 sidecar verification.** Every release ships a `<exe>.sha256`
+  sidecar next to the exe. The downloader streams the exe to disk, opens
+  it back up with `FileShare.None`, hashes the on-disk bytes, and compares
+  against the sidecar before swapping the file into place. Mismatch → the
+  staged file is deleted and the update aborts.
+* **Path-traversal validation.** Asset names from the GitHub API are
+  validated against `Path.GetFileName` and rejected if they contain
+  separators, `..`, or other unsafe characters before being used in a
+  file path. (Added in v0.2.0; closes a theoretical attack against a
+  compromised release.)
+* **User confirmation.** Even with everything verified, the app always
+  prompts with a Yes/No dialog before swapping the binary. Auto-install is
+  never silent.
+* **Atomic in-place swap.** The new exe is moved into the canonical
+  location with `File.Move` (atomic on NTFS). The old exe is renamed to
+  `<exe>.old` and cleaned up on the next launch.
+
+We do **not** yet code-sign the exe. If you have a strict integrity
+requirement, grab the SHA-256 value posted on the GitHub release page and
+verify it yourself with `Get-FileHash` before each upgrade. Code-signing is
+tracked for a future release.
 
 ---
 

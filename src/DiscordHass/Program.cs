@@ -36,10 +36,30 @@ internal static class Program
         ConfigStore configStore = new();
         AppConfig config = configStore.Load();
 
+        // Upgrade-safe wizard gating: if the existing config already has every credential the
+        // wizard would set, mark onboarding complete so v0.1.x users never see the wizard.
+        // Idempotent — safe to run every launch.
+        if (!config.HasCompletedOnboarding && LooksConfigured(config))
+        {
+            config.HasCompletedOnboarding = true;
+            try { configStore.Save(config); } catch { /* tolerate */ }
+        }
+
         using ApplicationContext appContext = new TrayApplicationContext(config, configStore);
         Application.Run(appContext);
         return 0;
     }
+
+    /// <summary>
+    /// True when every credential the onboarding wizard would set is already present.
+    /// Strictly stronger than "have they used the app before?" — partial setups intentionally
+    /// still trigger the wizard so missing pieces get guided.
+    /// </summary>
+    internal static bool LooksConfigured(AppConfig c) =>
+           !string.IsNullOrWhiteSpace(c.HaBaseUrl)
+        && !string.IsNullOrWhiteSpace(c.HaTokenProtected)
+        && !string.IsNullOrWhiteSpace(c.DiscordClientId)
+        && !string.IsNullOrWhiteSpace(c.DiscordRefreshTokenProtected);
 
     private static void HandlePostUpdateArgs(string[] args)
     {

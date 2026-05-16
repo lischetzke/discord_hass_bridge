@@ -14,10 +14,14 @@ internal static class DiscordScopes
 {
     public const string Rpc          = "rpc";
     public const string RpcVoiceRead = "rpc.voice.read";
+    // Intentionally NOT in Required as of v0.2.0 — kept here only to recognize legacy cached
+    // scope sets. Camera state is read from the Windows Capability Access Manager registry
+    // (see WindowsCameraWatcher); Discord's RPC never exposed self_video to user-registered
+    // apps, so requesting this scope previously was dead weight.
     public const string RpcVideoRead = "rpc.video.read";
     public const string Identify     = "identify";
 
-    public static readonly string[] Required = { Rpc, RpcVoiceRead, RpcVideoRead, Identify };
+    public static readonly string[] Required = { Rpc, RpcVoiceRead, Identify };
 
     /// <summary>Stable, ordered representation of <see cref="Required"/> for equality checks.</summary>
     public static string CurrentKey()

@@ -35,6 +35,8 @@ internal sealed class UpdateProgressForm : Form
         MaximizeBox = false;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         ShowInTaskbar = true;
+        BackColor = ThemeColors.Background;
+        ForeColor = ThemeColors.OnSurface;
 
         _titleLabel = new Label
         {
@@ -44,6 +46,7 @@ internal sealed class UpdateProgressForm : Form
             Width = 440,
             Height = 22,
             Font = new Font(Font, FontStyle.Bold),
+            ForeColor = ThemeColors.OnSurface,
         };
 
         _progress = new ProgressBar
@@ -63,7 +66,7 @@ internal sealed class UpdateProgressForm : Form
             AutoSize = false,
             Width = 440,
             Height = 22,
-            ForeColor = Color.DimGray,
+            ForeColor = ThemeColors.OnSurfaceDim,
             Text = $"Connecting to GitHub… ({FormatBytes(target.ExeAssetSize)} expected)",
         };
 
@@ -119,7 +122,7 @@ internal sealed class UpdateProgressForm : Form
             if (!ok)
             {
                 _titleLabel.Text = "Update failed";
-                _titleLabel.ForeColor = Color.Firebrick;
+                _titleLabel.ForeColor = ThemeColors.StatusError;
                 _statusLabel.Text = _updates.LastError ?? "Unknown error.";
                 _cancelButton.Text = "Close";
                 _cancelButton.Enabled = true;
@@ -143,7 +146,7 @@ internal sealed class UpdateProgressForm : Form
         catch (OperationCanceledException)
         {
             _titleLabel.Text = "Update cancelled";
-            _titleLabel.ForeColor = Color.DimGray;
+            _titleLabel.ForeColor = ThemeColors.OnSurfaceDim;
             _statusLabel.Text = "No changes were made.";
             _cancelButton.Text = "Close";
             _cancelButton.Enabled = true;
@@ -151,7 +154,7 @@ internal sealed class UpdateProgressForm : Form
         catch (Exception ex)
         {
             _titleLabel.Text = "Update failed";
-            _titleLabel.ForeColor = Color.Firebrick;
+            _titleLabel.ForeColor = ThemeColors.StatusError;
             _statusLabel.Text = ex.Message;
             _cancelButton.Text = "Close";
             _cancelButton.Enabled = true;

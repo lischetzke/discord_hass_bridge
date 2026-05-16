@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
+using DiscordHass.App;
 
 namespace DiscordHass.HomeAssistant;
 
@@ -146,6 +147,7 @@ internal sealed class HaWebSocketClient : IAsyncDisposable
             while (!ct.IsCancellationRequested && socket.State == WebSocketState.Open)
             {
                 HaServerMessage msg = await ReceiveMessageAsync(socket, ct).ConfigureAwait(false);
+                AppMetrics.IncrementHaFrameReceived();
                 DispatchMessage(msg);
             }
         }
@@ -202,6 +204,7 @@ internal sealed class HaWebSocketClient : IAsyncDisposable
         try
         {
             await socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, ct).ConfigureAwait(false);
+            AppMetrics.IncrementHaFrameSent();
         }
         finally
         {

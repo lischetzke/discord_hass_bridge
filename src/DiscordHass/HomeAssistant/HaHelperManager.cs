@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using DiscordHass.App;
 
 namespace DiscordHass.HomeAssistant;
 
@@ -84,6 +85,7 @@ internal sealed class HaHelperManager
             target = new { entity_id = $"input_boolean.{entityIdSlug}" },
         };
         await _client.SendCommandAsync(payload, ct).ConfigureAwait(false);
+        AppMetrics.IncrementHelperPublish();
     }
 
     private async Task<bool> TryRenameAsync(string oldSlug, string newSlug, CancellationToken ct)
